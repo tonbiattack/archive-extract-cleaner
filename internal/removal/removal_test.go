@@ -2,6 +2,7 @@ package removal
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
 )
 
-func TestDeleteFolder(t *testing.T) {
+func TestDeleteFolderToRecycleBin(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "photos")
 	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
@@ -20,9 +21,16 @@ func TestDeleteFolder(t *testing.T) {
 	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
 		t.Fatal(err)
 	}
-	result := Delete(context.Background(), folder, []string{root})
+	called := false
+	result := Delete(context.Background(), folder, []string{root}, func(path string) error {
+		called = true
+		return os.RemoveAll(path)
+	})
 	if !result.Success {
-		t.Fatalf("delete failed: %s", result.Reason)
+		t.Fatalf("recycle failed: %s", result.Reason)
+	}
+	if !called {
+		t.Fatal("mover was not called")
 	}
 	if _, err := os.Lstat(folder); !os.IsNotExist(err) {
 		t.Fatalf("folder still exists: %v", err)
@@ -30,25 +38,24 @@ func TestDeleteFolder(t *testing.T) {
 	if _, err := os.Stat(zipPath); err != nil {
 		t.Fatalf("zip was removed: %v", err)
 	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.Contains(entry.Name(), ".deleting-") {
-			t.Fatalf("quarantine left behind: %s", entry.Name())
-		}
-	}
 }
 
 func TestDeleteRefusesRootAndOutside(t *testing.T) {
 	root := t.TempDir()
-	if result := Delete(context.Background(), root, []string{root}); result.Success {
-		t.Fatal("root deletion should be refused")
+	called := false
+	mover := func(string) error {
+		called = true
+		return nil
+	}
+	if result := Delete(context.Background(), root, []string{root}, mover); result.Success {
+		t.Fatal("root recycle should be refused")
 	}
 	outside := t.TempDir()
-	if result := Delete(context.Background(), outside, []string{root}); result.Success {
-		t.Fatal("outside deletion should be refused")
+	if result := Delete(context.Background(), outside, []string{root}, mover); result.Success {
+		t.Fatal("outside recycle should be refused")
+	}
+	if called {
+		t.Fatal("mover must not be called for refused targets")
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("outside folder was removed: %v", err)
@@ -65,9 +72,53 @@ func TestDeleteRefusesJunction(t *testing.T) {
 	if err := testutil.Junction(filepath.Join(folder, "link"), target); err != nil {
 		t.Skipf("cannot create junction: %v", err)
 	}
-	result := Delete(context.Background(), folder, []string{root})
+	called := false
+	result := Delete(context.Background(), folder, []string{root}, func(string) error {
+		called = true
+		return nil
+	})
 	if result.Success {
-		t.Fatal("junction deletion should be refused")
+		t.Fatal("junction recycle should be refused")
+	}
+	if called {
+		t.Fatal("mover must not be called for a folder containing a junction")
+	}
+	if _, err := os.Stat(folder); err != nil {
+		t.Fatalf("folder was removed: %v", err)
+	}
+}
+
+func TestDeleteDoesNotFallBackWhenMoverFails(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "photos")
+	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	result := Delete(context.Background(), folder, []string{root}, func(string) error {
+		return errors.New("recycle bin unavailable")
+	})
+	if result.Success {
+		t.Fatal("recycle failure must not be reported as success")
+	}
+	if !strings.Contains(result.Reason, "ごみ箱") {
+		t.Fatalf("reason = %s", result.Reason)
+	}
+	if _, err := os.Stat(filepath.Join(folder, "a.txt")); err != nil {
+		t.Fatalf("folder was permanently deleted despite mover failure: %v", err)
+	}
+}
+
+func TestDeleteFailsWhenTargetStillExists(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "photos")
+	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	result := Delete(context.Background(), folder, []string{root}, func(string) error {
+		return nil
+	})
+	if result.Success {
+		t.Fatal("mover that leaves the folder must not be reported as success")
 	}
 	if _, err := os.Stat(folder); err != nil {
 		t.Fatalf("folder was removed: %v", err)

@@ -428,6 +428,7 @@ func analyzeArchive(ctx context.Context, archivePath string, state *walkState, l
 		item.Reason = "同名の解凍済みフォルダが複数あるため自動判定できません"
 		for _, c := range candidates {
 			item.Details = append(item.Details, c.path)
+			item.RelatedFolders = append(item.RelatedFolders, c.path)
 		}
 		return item
 	}

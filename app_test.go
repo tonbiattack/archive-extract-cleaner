@@ -18,6 +18,7 @@ func newTestApp(t *testing.T) *App {
 	app.log = oplog.New(filepath.Join(t.TempDir(), "operations.jsonl"))
 	app.logPath = app.log.Path()
 	app.limits = model.DefaultLimits()
+	app.mover = func(path string) error { return os.RemoveAll(path) }
 	return app
 }
 
@@ -109,6 +110,9 @@ func TestAppScanRowsAndDelete(t *testing.T) {
 	if !entry.Success || entry.Verdict != string(model.VerdictDeleteCandidate) {
 		t.Fatalf("log entry = %+v", entry)
 	}
+	if entry.Action != "recycle" {
+		t.Fatalf("log action = %q", entry.Action)
+	}
 	if entry.ZipPath != zipPath || entry.FolderPath != folder {
 		t.Fatalf("log paths = %+v", entry)
 	}
@@ -151,6 +155,76 @@ func TestAppDeleteSkipsChangedTarget(t *testing.T) {
 	row := app.GetRows(RowQuery{Filter: "all"}).Rows[0]
 	if row.Verdict != string(model.VerdictMismatch) || row.Status != string(model.StatusError) {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+func TestAppTransferReview(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "photos.zip")
+	folder := filepath.Join(root, "photos")
+	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(t.TempDir(), "MultiDriveCopy.ps1")
+	if err := os.WriteFile(script, []byte("# test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.multiDriveCopyScript = script
+	app.multiDriveCopyPreset = "Backup"
+
+	review := app.GetTransferReview()
+	if !review.ScriptAvailable || review.Preset != "Backup" {
+		t.Fatalf("review = %+v", review)
+	}
+	found := false
+	for _, candidate := range review.Candidates {
+		if candidate.Path == zipPath {
+			found = true
+			if !candidate.Selected || candidate.Review || candidate.Kind != "zip" {
+				t.Fatalf("zip candidate = %+v", candidate)
+			}
+		}
+		if candidate.Path == folder {
+			t.Fatalf("folder should be omitted when the matching ZIP exists: %+v", candidate)
+		}
+	}
+	if !found {
+		t.Fatalf("zip candidate not found: %+v", review.Candidates)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.zip")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.LaunchMultiDriveCopy([]string{outside}); err == nil {
+		t.Fatal("unscanned path must be rejected")
+	}
+
+	if err := os.RemoveAll(folder); err != nil {
+		t.Fatal(err)
+	}
+	review = app.GetTransferReview()
+	if review.MissingCount != 1 {
+		t.Fatalf("missing count = %d, review = %+v", review.MissingCount, review.Candidates)
+	}
+	for _, candidate := range review.Candidates {
+		if candidate.Path == folder && (candidate.Exists || candidate.Selected || !candidate.Review) {
+			t.Fatalf("missing folder candidate = %+v", candidate)
+		}
+	}
+}
+
+func TestCopyTextRequiresInitializedContext(t *testing.T) {
+	app := NewApp()
+	if err := app.CopyText("hello"); err == nil {
+		t.Fatal("CopyText should fail before Wails startup")
 	}
 }
 

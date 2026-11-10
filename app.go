@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/removal"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/transfer"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/verify"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
@@ -26,21 +29,24 @@ const appVersion = "0.1.0"
 type App struct {
 	ctx context.Context
 
-	mu            sync.RWMutex
-	items         []model.Item
-	index         map[string]int
-	roots         []string
-	summary       model.Summary
-	warnings      []string
-	warningTotal  int
-	scanning      bool
-	deleting      bool
-	cancelScan    context.CancelFunc
-	log           *oplog.Logger
-	logPath       string
-	limits        model.Limits
-	configPath    string
-	configWarning string
+	mu                   sync.RWMutex
+	items                []model.Item
+	index                map[string]int
+	roots                []string
+	summary              model.Summary
+	warnings             []string
+	warningTotal         int
+	scanning             bool
+	deleting             bool
+	cancelScan           context.CancelFunc
+	log                  *oplog.Logger
+	logPath              string
+	limits               model.Limits
+	configPath           string
+	configWarning        string
+	mover                removal.Mover
+	multiDriveCopyScript string
+	multiDriveCopyPreset string
 }
 
 type ScanInfo struct {
@@ -52,17 +58,20 @@ type ScanInfo struct {
 }
 
 type AppState struct {
-	Summary       model.Summary `json:"summary"`
-	Warnings      []string      `json:"warnings"`
-	WarningTotal  int           `json:"warningTotal"`
-	Roots         []string      `json:"roots"`
-	Scanning      bool          `json:"scanning"`
-	Deleting      bool          `json:"deleting"`
-	LogPath       string        `json:"logPath"`
-	ConfigPath    string        `json:"configPath"`
-	ConfigWarning string        `json:"configWarning"`
-	Limits        model.Limits  `json:"limits"`
-	Version       string        `json:"version"`
+	Summary                 model.Summary `json:"summary"`
+	Warnings                []string      `json:"warnings"`
+	WarningTotal            int           `json:"warningTotal"`
+	Roots                   []string      `json:"roots"`
+	Scanning                bool          `json:"scanning"`
+	Deleting                bool          `json:"deleting"`
+	LogPath                 string        `json:"logPath"`
+	ConfigPath              string        `json:"configPath"`
+	ConfigWarning           string        `json:"configWarning"`
+	Limits                  model.Limits  `json:"limits"`
+	MultiDriveCopyScript    string        `json:"multiDriveCopyScript"`
+	MultiDriveCopyPreset    string        `json:"multiDriveCopyPreset"`
+	MultiDriveCopyAvailable bool          `json:"multiDriveCopyAvailable"`
+	Version                 string        `json:"version"`
 }
 
 type DeleteProgress struct {
@@ -83,12 +92,21 @@ type DeleteResponse struct {
 func NewApp() *App {
 	logger := oplog.New("")
 	cfg, configPath, configErr := config.Load("")
+	scriptPath := cfg.MultiDriveCopy.ScriptPath
+	if scriptPath == "" {
+		scriptPath = transfer.DefaultScriptPath()
+	} else if abs, err := filepath.Abs(scriptPath); err == nil {
+		scriptPath = abs
+	}
 	app := &App{
-		index:      map[string]int{},
-		log:        logger,
-		logPath:    logger.Path(),
-		limits:     cfg.Limits,
-		configPath: configPath,
+		index:                map[string]int{},
+		log:                  logger,
+		logPath:              logger.Path(),
+		limits:               cfg.Limits,
+		configPath:           configPath,
+		mover:                removal.MoveToRecycleBin,
+		multiDriveCopyScript: scriptPath,
+		multiDriveCopyPreset: cfg.MultiDriveCopy.Preset,
 	}
 	if configErr != nil {
 		app.configWarning = "設定ファイルを読み込めないため既定値を使用します: " + configErr.Error()
@@ -118,18 +136,80 @@ func (a *App) GetState() AppState {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return AppState{
-		Summary:       a.summary,
-		Warnings:      append([]string(nil), a.warnings...),
-		WarningTotal:  a.warningTotal,
-		Roots:         append([]string(nil), a.roots...),
-		Scanning:      a.scanning,
-		Deleting:      a.deleting,
-		LogPath:       a.logPath,
-		ConfigPath:    a.configPath,
-		ConfigWarning: a.configWarning,
-		Limits:        a.limits,
-		Version:       appVersion,
+		Summary:                 a.summary,
+		Warnings:                append([]string(nil), a.warnings...),
+		WarningTotal:            a.warningTotal,
+		Roots:                   append([]string(nil), a.roots...),
+		Scanning:                a.scanning,
+		Deleting:                a.deleting,
+		LogPath:                 a.logPath,
+		ConfigPath:              a.configPath,
+		ConfigWarning:           a.configWarning,
+		Limits:                  a.limits,
+		MultiDriveCopyScript:    a.multiDriveCopyScript,
+		MultiDriveCopyPreset:    a.multiDriveCopyPreset,
+		MultiDriveCopyAvailable: transfer.ScriptAvailable(a.multiDriveCopyScript),
+		Version:                 appVersion,
 	}
+}
+
+func (a *App) GetTransferReview() transfer.Review {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	items := append([]model.Item(nil), a.items...)
+	return transfer.BuildReview(items, a.multiDriveCopyScript, a.multiDriveCopyPreset, a.scanning || a.deleting)
+}
+
+func (a *App) LaunchMultiDriveCopy(paths []string) (transfer.LaunchResult, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.scanning || a.deleting {
+		return transfer.LaunchResult{}, errors.New("スキャンまたはごみ箱移動の処理中は転送を開始できません")
+	}
+	items := append([]model.Item(nil), a.items...)
+	review := transfer.BuildReview(items, a.multiDriveCopyScript, a.multiDriveCopyPreset, false)
+	allowed := make(map[string]transfer.Candidate, len(review.Candidates))
+	for _, candidate := range review.Candidates {
+		allowed[winpath.Key(candidate.Path)] = candidate
+	}
+
+	selected := make([]string, 0, len(paths))
+	missing := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		abs, err := winpath.CleanAbs(path)
+		if err != nil {
+			return transfer.LaunchResult{}, fmt.Errorf("転送対象のパスが不正です: %w", err)
+		}
+		key := winpath.Key(abs)
+		if _, ok := allowed[key]; !ok {
+			return transfer.LaunchResult{}, fmt.Errorf("スキャン結果に含まれないパスは転送できません: %s", abs)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		if _, err := os.Lstat(abs); err != nil {
+			missing = append(missing, abs)
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, abs)
+	}
+	if len(missing) > 0 {
+		preview := missing
+		if len(preview) > 5 {
+			preview = preview[:5]
+		}
+		message := "次のパスが見つかりません: " + strings.Join(preview, ", ")
+		if len(missing) > len(preview) {
+			message += fmt.Sprintf(" ほか %d 件", len(missing)-len(preview))
+		}
+		return transfer.LaunchResult{}, errors.New(message)
+	}
+	if len(selected) == 0 {
+		return transfer.LaunchResult{}, errors.New("転送対象が選択されていません")
+	}
+	return transfer.Launch(selected, a.multiDriveCopyScript, a.multiDriveCopyPreset)
 }
 
 func (a *App) Scan(roots []string) (ScanInfo, error) {
@@ -320,7 +400,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 		return DeleteResponse{}, errors.New("明示的な確認が必要です")
 	}
 	if len(ids) == 0 {
-		return DeleteResponse{}, errors.New("削除対象が選択されていません")
+		return DeleteResponse{}, errors.New("移動対象が選択されていません")
 	}
 	a.mu.Lock()
 	if a.deleting || a.scanning {
@@ -336,6 +416,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 	limits := a.limits
 	logger := a.log
 	index := a.index
+	mover := a.mover
 	a.deleting = true
 	a.mu.Unlock()
 
@@ -366,9 +447,9 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			skipped++
 			results = append(results, model.DeleteResult{
 				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Skipped: true, Reason: "削除可能な項目ではありません", LogPath: a.logPath,
+				Skipped: true, Reason: "移動可能な項目ではありません", LogPath: a.logPath,
 			})
-			a.appendLog(logger, item, false, "削除可能な項目ではありません")
+			a.appendLog(logger, item, false, "移動可能な項目ではありません")
 			continue
 		}
 
@@ -391,8 +472,8 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			continue
 		}
 
-		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "deleting"})
-		removalResult := removal.Delete(base, item.FolderPath, roots)
+		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "recycling"})
+		removalResult := removal.Delete(base, item.FolderPath, roots, mover)
 		now := time.Now()
 		logItem := item
 		if removalResult.Success {
@@ -402,7 +483,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			item.DeleteError = ""
 			item.Details = nil
 			item.MatchMode = ""
-			item.Reason = "解凍済みフォルダを削除しました"
+			item.Reason = "Windowsのごみ箱に移動しました"
 			item.Size = item.ZipSize
 			deleted++
 			results = append(results, model.DeleteResult{
@@ -411,14 +492,10 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			})
 			a.appendLog(logger, logItem, true, "")
 		} else {
-			reason := removalResult.Reason
-			if removalResult.Quarantined != "" {
-				reason += "（退避先: " + removalResult.Quarantined + "）"
-			}
 			item.Verdict = model.VerdictUnverified
 			item.Status = model.StatusError
-			item.Reason = "削除に失敗しました: " + reason
-			item.DeleteError = reason
+			item.Reason = "ごみ箱への移動に失敗しました: " + removalResult.Reason
+			item.DeleteError = removalResult.Reason
 			item.CheckedAt = now
 			failed++
 			results = append(results, model.DeleteResult{
@@ -455,7 +532,7 @@ func (a *App) appendLog(logger *oplog.Logger, item model.Item, success bool, mes
 	}
 	err := logger.Append(oplog.Entry{
 		Time:       time.Now(),
-		Action:     "delete",
+		Action:     "recycle",
 		ID:         item.ID,
 		ZipPath:    item.ZipPath,
 		FolderPath: item.FolderPath,
@@ -518,6 +595,19 @@ func (a *App) RevealItem(id string) error {
 		return a.OpenInExplorer(item.ZipPath)
 	}
 	return errors.New("開けるパスがありません")
+}
+
+func (a *App) CopyText(text string) error {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		return errors.New("アプリケーションが初期化されていません")
+	}
+	if text == "" {
+		return errors.New("コピーするテキストがありません")
+	}
+	return wailsruntime.ClipboardSetText(ctx, text)
 }
 
 func (a *App) OpenConfig() error {

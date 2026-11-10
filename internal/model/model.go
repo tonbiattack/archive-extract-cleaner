@@ -44,26 +44,27 @@ const (
 )
 
 type Item struct {
-	ID            string    `json:"id"`
-	Verdict       Verdict   `json:"verdict"`
-	Status        Status    `json:"status"`
-	ZipPath       string    `json:"zipPath"`
-	FolderPath    string    `json:"folderPath"`
-	ParentPath    string    `json:"parentPath"`
-	Name          string    `json:"name"`
-	ZipSize       int64     `json:"zipSize"`
-	FolderSize    int64     `json:"folderSize"`
-	Size          int64     `json:"size"`
-	Reason        string    `json:"reason"`
-	Details       []string  `json:"details,omitempty"`
-	MatchMode     MatchMode `json:"matchMode,omitempty"`
-	FileCount     int       `json:"fileCount"`
-	DirCount      int       `json:"dirCount"`
-	ZipEntries    int       `json:"zipEntries"`
-	ComparedBytes int64     `json:"comparedBytes"`
-	CheckedAt     time.Time `json:"checkedAt"`
-	DeletedAt     time.Time `json:"deletedAt,omitempty"`
-	DeleteError   string    `json:"deleteError,omitempty"`
+	ID             string    `json:"id"`
+	Verdict        Verdict   `json:"verdict"`
+	Status         Status    `json:"status"`
+	ZipPath        string    `json:"zipPath"`
+	FolderPath     string    `json:"folderPath"`
+	ParentPath     string    `json:"parentPath"`
+	Name           string    `json:"name"`
+	ZipSize        int64     `json:"zipSize"`
+	FolderSize     int64     `json:"folderSize"`
+	Size           int64     `json:"size"`
+	Reason         string    `json:"reason"`
+	Details        []string  `json:"details,omitempty"`
+	RelatedFolders []string  `json:"relatedFolders,omitempty"`
+	MatchMode      MatchMode `json:"matchMode,omitempty"`
+	FileCount      int       `json:"fileCount"`
+	DirCount       int       `json:"dirCount"`
+	ZipEntries     int       `json:"zipEntries"`
+	ComparedBytes  int64     `json:"comparedBytes"`
+	CheckedAt      time.Time `json:"checkedAt"`
+	DeletedAt      time.Time `json:"deletedAt,omitempty"`
+	DeleteError    string    `json:"deleteError,omitempty"`
 }
 
 func (i Item) Deletable() bool {

@@ -3,6 +3,8 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -15,7 +17,17 @@ var assets embed.FS
 
 func main() {
 	app := NewApp()
-	err := wails.Run(&options.App{
+
+	userDataPath, err := os.UserCacheDir()
+	if err != nil {
+		userDataPath = os.TempDir()
+	}
+	userDataPath = filepath.Join(userDataPath, "archive-extract-cleaner", "webview")
+	if err := os.MkdirAll(userDataPath, 0o700); err != nil {
+		log.Printf("WebView2のユーザーデータフォルダを作成できません: %v", err)
+	}
+
+	err = wails.Run(&options.App{
 		Title:                    "archive-extract-cleaner",
 		Width:                    1360,
 		Height:                   860,
@@ -31,6 +43,7 @@ func main() {
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
 			DisableWindowIcon:    false,
+			WebviewUserDataPath:  userDataPath,
 		},
 	})
 	if err != nil {

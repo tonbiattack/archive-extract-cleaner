@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
@@ -192,7 +193,14 @@ func TestVerifyChecksumError(t *testing.T) {
 func TestVerifyDetectsChangeDuringVerification(t *testing.T) {
 	f := newFixture(t, []testutil.Entry{{Name: "a.txt", Content: "alpha"}}, map[string]string{"a.txt": "alpha"})
 	result := f.verify(t, Options{BeforeRead: func(path string) {
-		_ = os.WriteFile(path, []byte("bravo"), 0o644)
+		if err := os.WriteFile(path, []byte("bravo"), 0o644); err != nil {
+			t.Errorf("write: %v", err)
+			return
+		}
+		stamp := time.Now().Add(2 * time.Second)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Errorf("chtimes: %v", err)
+		}
 	}})
 	if result.Verdict != model.VerdictUnverified {
 		t.Fatalf("verdict = %s: %s", result.Verdict, result.Reason)

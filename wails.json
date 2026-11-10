@@ -1,0 +1,20 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "archive-extract-cleaner",
+  "outputfilename": "archive-extract-cleaner",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "tonbiattack",
+    "email": ""
+  },
+  "info": {
+    "companyName": "archive-extract-cleaner",
+    "productName": "archive-extract-cleaner",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright 2026",
+    "comments": "ZIPと解凍済みフォルダの安全な照合・整理ツール"
+  }
+}

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+          cache: true
+
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = gofmt -l .
+          if ($files) {
+            Write-Host "Unformatted files:"
+            $files
+            exit 1
+          }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -count=1
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+
+      - name: Add Go bin to PATH
+        shell: pwsh
+        run: |
+          $wailsPath = Join-Path (go env GOPATH) "bin"
+          $wailsPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build Windows GUI
+        run: wails build -clean
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-extract-cleaner-windows-amd64
+          path: build/bin/archive-extract-cleaner.exe
+          if-no-files-found: error

@@ -1,0 +1,5 @@
+build/bin/
+frontend/wailsjs/
+.commandcode/
+*.exe
+*.test

@@ -18,7 +18,7 @@
       </div>
       <div class="top-actions">
         <button id="settingsBtn" class="btn ghost">設定</button>
-        <button id="openLogBtn" class="btn ghost" title="削除操作ログをエクスプローラーで開く">操作ログ</button>
+        <button id="openLogBtn" class="btn ghost" title="操作ログをエクスプローラーで開く">操作ログ</button>
         <span id="versionText" class="version"></span>
       </div>
     </header>
@@ -60,6 +60,7 @@
         <button class="filter" data-filter="keep">保持</button>
       </div>
       <div class="toolbar-actions">
+        <button id="resetColumnsBtn" class="btn">列幅リセット</button>
         <button id="selectAllBtn" class="btn">候補を全選択</button>
         <button id="clearSelectionBtn" class="btn">選択解除</button>
       </div>
@@ -75,13 +76,13 @@
         <div id="tableScroll" class="table-scroll">
           <div id="tableHeader" class="table-header">
             <div class="cell check"></div>
-            <button class="cell sort" data-sort="verdict">判定<span class="arrow"></span></button>
-            <button class="cell sort" data-sort="name">名前<span class="arrow"></span></button>
-            <button class="cell sort" data-sort="zip">ZIP<span class="arrow"></span></button>
-            <button class="cell sort" data-sort="folder">解凍済みフォルダ<span class="arrow"></span></button>
-            <button class="cell sort" data-sort="parent">親パス<span class="arrow"></span></button>
-            <button class="cell sort numeric" data-sort="size">サイズ<span class="arrow"></span></button>
-            <button class="cell sort" data-sort="reason">理由<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="verdict">判定<span class="arrow"></span><span class="col-resize" data-col="1" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="name">名前<span class="arrow"></span><span class="col-resize" data-col="2" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="zip">ZIP<span class="arrow"></span><span class="col-resize" data-col="3" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="folder">解凍済みフォルダ<span class="arrow"></span><span class="col-resize" data-col="4" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="parent">親パス<span class="arrow"></span><span class="col-resize" data-col="5" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort numeric" data-sort="size">サイズ<span class="arrow"></span><span class="col-resize" data-col="6" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="reason">理由<span class="arrow"></span><span class="col-resize" data-col="7" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
           </div>
           <div id="virtual" class="virtual">
             <div id="rows" class="rows"></div>
@@ -105,7 +106,7 @@
       <div id="statusText" class="status-text">待機中</div>
       <div class="status-right">
         <span id="selectionInfo" class="selection-info">選択 0 件</span>
-        <button id="deleteBtn" class="btn danger" disabled>選択項目を削除</button>
+        <button id="deleteBtn" class="btn danger" disabled>選択項目をごみ箱に移動</button>
       </div>
     </footer>
   </div>
@@ -119,6 +120,15 @@
       <div id="modalBody" class="modal-body"></div>
       <div id="modalActions" class="modal-actions"></div>
     </div>
+  </div>
+
+  <div id="contextMenu" class="context-menu hidden" role="menu">
+    <button data-copy-field="name" role="menuitem">ファイル名をコピー</button>
+    <button data-copy-field="zipPath" role="menuitem">ZIPのフルパスをコピー</button>
+    <button data-copy-field="folderPath" role="menuitem">解凍済みフォルダのフルパスをコピー</button>
+    <button data-copy-field="parentPath" role="menuitem">親パスをコピー</button>
+    <div class="menu-separator"></div>
+    <button data-menu-action="reveal" role="menuitem">エクスプローラーで表示</button>
   </div>
 
   <div id="toast" class="toast hidden"></div>

@@ -18,6 +18,7 @@ func newTestApp(t *testing.T) *App {
 	app.log = oplog.New(filepath.Join(t.TempDir(), "operations.jsonl"))
 	app.logPath = app.log.Path()
 	app.limits = model.DefaultLimits()
+	app.mover = func(path string) error { return os.RemoveAll(path) }
 	return app
 }
 
@@ -109,6 +110,9 @@ func TestAppScanRowsAndDelete(t *testing.T) {
 	if !entry.Success || entry.Verdict != string(model.VerdictDeleteCandidate) {
 		t.Fatalf("log entry = %+v", entry)
 	}
+	if entry.Action != "recycle" {
+		t.Fatalf("log action = %q", entry.Action)
+	}
 	if entry.ZipPath != zipPath || entry.FolderPath != folder {
 		t.Fatalf("log paths = %+v", entry)
 	}
@@ -151,6 +155,13 @@ func TestAppDeleteSkipsChangedTarget(t *testing.T) {
 	row := app.GetRows(RowQuery{Filter: "all"}).Rows[0]
 	if row.Verdict != string(model.VerdictMismatch) || row.Status != string(model.StatusError) {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+func TestCopyTextRequiresInitializedContext(t *testing.T) {
+	app := NewApp()
+	if err := app.CopyText("hello"); err == nil {
+		t.Fatal("CopyText should fail before Wails startup")
 	}
 }
 

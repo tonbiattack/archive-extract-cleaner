@@ -4,6 +4,17 @@
   const ROW_H = 34;
   const OVERSCAN = 10;
   const PAGE_SIZE = 200;
+  const COLUMN_STORAGE_KEY = "archive-extract-cleaner.columnWidths.v1";
+  const COLUMNS = [
+    { min: 34, def: 34 },
+    { min: 90, def: 106 },
+    { min: 100, def: 170 },
+    { min: 100, def: 190 },
+    { min: 100, def: 210 },
+    { min: 100, def: 220 },
+    { min: 80, def: 96 },
+    { min: 120, def: 260 },
+  ];
 
   const state = {
     roots: [],
@@ -30,6 +41,9 @@
     configWarning: "",
     limits: null,
     deleteTotal: 0,
+    columnWidths: COLUMNS.map((column) => column.def),
+    contextRow: null,
+    detailItem: null,
   };
 
   const el = (id) => document.getElementById(id);
@@ -55,6 +69,7 @@
   const deleteBtn = el("deleteBtn");
   const selectAllBtn = el("selectAllBtn");
   const clearSelectionBtn = el("clearSelectionBtn");
+  const resetColumnsBtn = el("resetColumnsBtn");
   const progressPanel = el("progressPanel");
   const progressLabel = el("progressLabel");
   const progressMeta = el("progressMeta");
@@ -69,11 +84,14 @@
   const toastEl = el("toast");
   const versionText = el("versionText");
   const settingsBtn = el("settingsBtn");
+  const contextMenu = el("contextMenu");
 
   let toastTimer = null;
   let searchTimer = null;
   let renderScheduled = false;
   let lastProgressHide = null;
+  let suppressSortClick = false;
+  let measureContext = null;
 
   function esc(value) {
     return String(value == null ? "" : value)
@@ -122,6 +140,184 @@
     return date.toLocaleString("ja-JP");
   }
 
+  function loadColumnWidths() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(COLUMN_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length !== COLUMNS.length) return;
+      state.columnWidths = COLUMNS.map((column, index) => {
+        const value = Number(parsed[index]);
+        return Number.isFinite(value) ? Math.min(900, Math.max(column.min, Math.round(value))) : column.def;
+      });
+    } catch (_) {
+      state.columnWidths = COLUMNS.map((column) => column.def);
+    }
+  }
+
+  function applyColumnWidths() {
+    const total = state.columnWidths.reduce((sum, width) => sum + width, 0);
+    const template = state.columnWidths.map((width) => width + "px").join(" ") + " minmax(0, 1fr)";
+    const root = document.documentElement;
+    if (root && root.style) {
+      root.style.setProperty("--cols", template);
+      root.style.setProperty("--min-table", total + "px");
+    }
+  }
+
+  function saveColumnWidths() {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(state.columnWidths));
+      }
+    } catch (_) {
+      // 保存できない環境では現在のセッション内だけ保持する
+    }
+  }
+
+  function resetColumnWidths() {
+    state.columnWidths = COLUMNS.map((column) => column.def);
+    applyColumnWidths();
+    saveColumnWidths();
+  }
+
+  function columnText(row, index) {
+    switch (index) {
+      case 1:
+        return VERDICT_LABEL[row.verdict] || row.verdict || "";
+      case 2:
+        return row.name || "";
+      case 3:
+        return row.zipPath ? baseName(row.zipPath) : "";
+      case 4:
+        return row.folderPath ? baseName(row.folderPath) : "";
+      case 5:
+        return row.parentPath || "";
+      case 6:
+        return fmtBytes(row.size);
+      case 7:
+        return row.reason || "";
+      default:
+        return "";
+    }
+  }
+
+  function measureText(text) {
+    if (!measureContext) {
+      const canvas = document.createElement("canvas");
+      measureContext = canvas.getContext ? canvas.getContext("2d") : null;
+      if (measureContext) {
+        measureContext.font = '12px "Segoe UI", "Yu Gothic UI", "Meiryo", system-ui, sans-serif';
+      }
+    }
+    if (!measureContext) return String(text || "").length * 8;
+    return measureContext.measureText(String(text || "")).width;
+  }
+
+  function autoFitColumn(index) {
+    if (index < 1 || index >= COLUMNS.length) return;
+    let widest = 0;
+    state.pages.forEach((rows) => {
+      rows.forEach((row) => {
+        widest = Math.max(widest, measureText(columnText(row, index)));
+      });
+    });
+    if (widest === 0) return;
+    state.columnWidths[index] = Math.max(COLUMNS[index].min, Math.min(900, Math.ceil(widest + 24)));
+    applyColumnWidths();
+    saveColumnWidths();
+  }
+
+  function setupColumnResizers() {
+    tableHeader.querySelectorAll(".col-resize").forEach((handle) => {
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const index = Number(handle.dataset.col);
+        if (!Number.isInteger(index) || index < 1 || index >= COLUMNS.length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const startX = event.clientX;
+        const startWidth = state.columnWidths[index];
+        suppressSortClick = true;
+        document.body.classList.add("col-resizing");
+        if (handle.setPointerCapture) {
+          try {
+            handle.setPointerCapture(event.pointerId);
+          } catch (_) {
+            // ポインタキャプチャ非対応でもウィンドウイベントで継続する
+          }
+        }
+        const onMove = (moveEvent) => {
+          const width = Math.max(COLUMNS[index].min, Math.round(startWidth + moveEvent.clientX - startX));
+          state.columnWidths[index] = width;
+          applyColumnWidths();
+        };
+        const onUp = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
+          document.body.classList.remove("col-resizing");
+          saveColumnWidths();
+          setTimeout(() => {
+            suppressSortClick = false;
+          }, 0);
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
+      });
+      handle.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        autoFitColumn(Number(handle.dataset.col));
+      });
+    });
+  }
+
+  async function copyText(text) {
+    if (!text) {
+      toast("コピーする内容がありません", true);
+      return;
+    }
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        toast("コピーしました");
+        return;
+      }
+    } catch (_) {
+      // Wails 側のクリップボードAPIへフォールバックする
+    }
+    try {
+      await api("CopyText", text);
+      toast("コピーしました");
+    } catch (error) {
+      toast("コピーに失敗しました: " + error.message, true);
+    }
+  }
+
+  function showRowContextMenu(event, row) {
+    state.contextRow = row;
+    contextMenu.querySelectorAll("[data-copy-field]").forEach((button) => {
+      button.disabled = !row[button.dataset.copyField];
+    });
+    const reveal = contextMenu.querySelector('[data-menu-action="reveal"]');
+    if (reveal) reveal.disabled = !row.zipPath && !row.folderPath;
+    contextMenu.classList.remove("hidden");
+    const rect = contextMenu.getBoundingClientRect();
+    let left = event.clientX;
+    let top = event.clientY;
+    if (left + rect.width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - rect.width - 8);
+    if (top + rect.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - rect.height - 8);
+    contextMenu.style.left = left + "px";
+    contextMenu.style.top = top + "px";
+  }
+
+  function hideContextMenu() {
+    state.contextRow = null;
+    contextMenu.classList.add("hidden");
+  }
+
   const VERDICT_LABEL = {
     DELETE_CANDIDATE: "削除候補",
     MISMATCH: "不一致",
@@ -141,7 +337,7 @@
     let html = '<span class="badge v-' + esc(verdict) + '">' + esc(VERDICT_LABEL[verdict] || verdict) + "</span>";
     const status = item.status || item.Status || "";
     if (status === "deleted") {
-      html += '<span class="badge badge-deleted">削除済み</span>';
+      html += '<span class="badge badge-deleted">ごみ箱へ移動済み</span>';
     } else if (status === "error") {
       html += '<span class="badge v-UNVERIFIED">エラー</span>';
     }
@@ -531,7 +727,7 @@
       '<span class="chip">保持 <strong>' + keep + "</strong></span>",
     ];
     if (summary.deletedCount) {
-      chips.push('<span class="chip">削除済み <strong>' + summary.deletedCount + "</strong></span>");
+      chips.push('<span class="chip">移動済み <strong>' + summary.deletedCount + "</strong></span>");
     }
     if (summary.durationMs) {
       chips.push('<span class="chip">所要時間 <strong>' + esc(fmtDuration(summary.durationMs)) + "</strong></span>");
@@ -610,12 +806,13 @@
   }
 
   function renderDetail(item) {
+    state.detailItem = item;
     const rows = [];
     rows.push(["判定", verdictBadge(item)]);
     if (item.status === "error") {
       rows.push(["状態", '<span class="result-fail">エラー</span>']);
     } else if (item.status === "deleted") {
-      rows.push(["状態", '<span class="result-ok">削除済み</span>']);
+      rows.push(["状態", '<span class="result-ok">ごみ箱へ移動済み</span>']);
     }
     rows.push(["ZIP", item.zipPath || "—"]);
     rows.push(["解凍済みフォルダ", item.folderPath || "—"]);
@@ -631,9 +828,28 @@
     if (item.comparedBytes) rows.push(["比較バイト数", fmtBytes(item.comparedBytes)]);
     rows.push(["確認日時", fmtDate(item.checkedAt)]);
     if (item.deletedAt && !String(item.deletedAt).startsWith("0001-")) {
-      rows.push(["削除日時", fmtDate(item.deletedAt)]);
+      rows.push(["移動日時", fmtDate(item.deletedAt)]);
     }
     if (item.deleteError) rows.push(["エラー", item.deleteError]);
+
+    const copyActions = [
+      ["name", "名前をコピー"],
+      ["zipPath", "ZIPパスをコピー"],
+      ["folderPath", "フォルダパスをコピー"],
+      ["parentPath", "親パスをコピー"],
+    ];
+    const copyButtons = copyActions
+      .map(
+        ([field, label]) =>
+          '<button class="copy-btn" data-action="copy" data-field="' +
+          field +
+          '"' +
+          (item[field] ? "" : " disabled") +
+          ">" +
+          esc(label) +
+          "</button>"
+      )
+      .join("");
 
     let html =
       '<div class="detail-block"><h3 class="detail-name">' +
@@ -645,6 +861,7 @@
       '<button class="btn small" data-action="reveal" data-id="' +
       esc(item.id) +
       '">エクスプローラーで表示</button>' +
+      copyButtons +
       "</div>" +
       '<dl class="detail-grid">' +
       rows
@@ -661,7 +878,8 @@
         item.details.map((detail) => "<li>" + esc(detail) + "</li>").join("") +
         "</ul></div>";
     }
-    html += '<div class="detail-note">MVPでは解凍済みフォルダのみ削除できます。ZIP本体は自動削除されません。</div>';
+    html +=
+      '<div class="detail-note">MVPでは解凍済みフォルダのみWindowsのごみ箱へ移動できます。ZIP本体は移動されません。失敗時に完全削除へフォールバックしません。</div>';
     detailPane.innerHTML = html;
   }
 
@@ -741,6 +959,7 @@
     renderSummary();
     detailPane.innerHTML =
       '<div class="detail-empty"><div class="detail-title">詳細</div><p>行を選択すると、ZIPとフォルダの対応・一致根拠・差異を表示します。</p></div>';
+    state.detailItem = null;
     clearRows(true);
     progressPanel.classList.remove("hidden");
     progressLabel.textContent = "スキャンを開始しています";
@@ -797,17 +1016,17 @@
     const ids = Array.from(state.selected.keys());
     state.busy = true;
     updateBusyUI();
-    setStatus("削除対象を確認しています...");
+    setStatus("ごみ箱に移動する対象を確認しています...");
     try {
       const preview = await api("PreviewDelete", ids);
       if (!preview || preview.count === 0) {
-        toast("現在選択されている項目に削除可能な候補がありません", true);
-        setStatus("選択項目に削除候補がありません");
+        toast("現在選択されている項目に移動可能な候補がありません", true);
+        setStatus("選択項目に移動可能な候補がありません");
         return;
       }
       showDeleteConfirm(preview);
     } catch (error) {
-      toast("削除対象の確認に失敗しました: " + error.message, true);
+      toast("移動対象の確認に失敗しました: " + error.message, true);
     } finally {
       state.busy = false;
       updateBusyUI();
@@ -822,23 +1041,23 @@
     const validIds = items.map((item) => item.id);
     const body =
       '<div class="stat-row">' +
-      '<div class="stat"><div class="stat-label">削除対象</div><div class="stat-value">' + preview.count + " 件</div></div>" +
+      '<div class="stat"><div class="stat-label">移動対象</div><div class="stat-value">' + preview.count + " 件</div></div>" +
       '<div class="stat"><div class="stat-label">合計サイズ</div><div class="stat-value">' + esc(fmtBytes(preview.bytes)) + "</div></div>" +
       "</div>" +
-      '<p class="modal-note">削除直前に各ZIPとフォルダを再照合します。内容に変化があればその対象はスキップされます。ZIP本体は削除されません。</p>' +
-      '<div class="detail-title" style="margin-top:14px">削除する解凍済みフォルダ</div>' +
+      '<p class="modal-note">Windowsのごみ箱に移動します。元に戻せます。移動直前に各ZIPとフォルダを再照合し、内容に変化があればその対象はスキップされます。ZIP本体は移動されません。</p>' +
+      '<div class="detail-title" style="margin-top:14px">ごみ箱に移動する解凍済みフォルダ</div>' +
       '<ul class="modal-list">' +
       visible.map((item) => "<li>" + esc(item.folderPath) + "</li>").join("") +
       (rest > 0 ? '<li class="muted">ほか ' + rest + " 件</li>" : "") +
       "</ul>";
     openModal({
-      title: "削除の最終確認",
+      title: "ごみ箱への移動確認",
       body,
       wide: true,
       actions: [
         { label: "キャンセル", className: "btn", onClick: closeModal },
         {
-          label: "削除する",
+          label: "ごみ箱に移動",
           className: "btn danger",
           onClick: () => executeDelete(validIds),
         },
@@ -853,8 +1072,8 @@
     const stageLabel =
       progress.stage === "revalidating"
         ? "再検証中"
-        : progress.stage === "deleting"
-        ? "削除中"
+        : progress.stage === "recycling" || progress.stage === "deleting"
+        ? "ごみ箱へ移動中"
         : progress.stage === "skipped"
         ? "スキップ"
         : progress.stage === "failed"
@@ -863,7 +1082,7 @@
         ? "完了"
         : "処理中";
     return (
-      '<p>対象を1件ずつ再検証してから削除しています。アプリを閉じたり操作を中断しないでください。</p>' +
+      '<p>対象を1件ずつ再検証してからWindowsのごみ箱に移動しています。アプリを閉じたり操作を中断しないでください。</p>' +
       '<div class="delete-progress"><div class="progress-head"><span>' +
       esc(stageLabel) +
       " " +
@@ -885,9 +1104,9 @@
     state.deleting = true;
     state.deleteTotal = ids.length;
     updateBusyUI();
-    setStatus("削除しています...");
+    setStatus("ごみ箱に移動しています...");
     openModal({
-      title: "削除しています",
+      title: "ごみ箱に移動しています",
       body: deleteProgressBody({ index: 0, total: ids.length, stage: "revalidating", name: "" }),
       actions: [],
       closable: false,
@@ -902,9 +1121,9 @@
       updateSelectionUI();
       await reloadRows(false);
       if (response && response.deleted > 0) {
-        toast(response.deleted + " 件の解凍済みフォルダを削除しました");
+        toast(response.deleted + " 件の解凍済みフォルダをごみ箱に移動しました");
         setStatus(
-          "削除完了: 成功 " +
+          "移動完了: 成功 " +
             response.deleted +
             " / 失敗 " +
             response.failed +
@@ -912,14 +1131,14 @@
             response.skipped
         );
       } else {
-        setStatus("削除された項目はありません");
+        setStatus("ごみ箱に移動された項目はありません");
       }
       showDeleteResult(response);
     } catch (error) {
       state.deleting = false;
       closeModal();
-      setStatus("削除に失敗しました");
-      toast("削除に失敗しました: " + error.message, true);
+      setStatus("ごみ箱への移動に失敗しました");
+      toast("ごみ箱への移動に失敗しました: " + error.message, true);
     } finally {
       state.busy = false;
       updateBusyUI();
@@ -934,7 +1153,7 @@
     const skipped = results.filter((item) => item.skipped);
     let body =
       '<div class="stat-row">' +
-      '<div class="stat"><div class="stat-label">削除成功</div><div class="stat-value result-ok">' +
+      '<div class="stat"><div class="stat-label">移動成功</div><div class="stat-value result-ok">' +
       (response.deleted || 0) +
       "</div></div>" +
       '<div class="stat"><div class="stat-label">失敗</div><div class="stat-value result-fail">' +
@@ -966,7 +1185,7 @@
       esc(state.logPath || "未設定") +
       "</p>";
     openModal({
-      title: "削除結果",
+      title: "ごみ箱移動結果",
       body,
       wide: true,
       actions: [
@@ -1119,6 +1338,7 @@
     });
 
     tableHeader.addEventListener("click", (event) => {
+      if (event.target.closest(".col-resize") || suppressSortClick) return;
       const button = event.target.closest("[data-sort]");
       if (!button) return;
       const key = button.dataset.sort;
@@ -1132,7 +1352,10 @@
       reloadRows(true);
     });
 
-    tableScroll.addEventListener("scroll", scheduleRender);
+    tableScroll.addEventListener("scroll", () => {
+      hideContextMenu();
+      scheduleRender();
+    });
     window.addEventListener("resize", scheduleRender);
 
     rowsEl.addEventListener("click", (event) => {
@@ -1148,6 +1371,7 @@
         }
         return;
       }
+      if (window.getSelection && window.getSelection().toString()) return;
       showDetail(row.id);
     });
 
@@ -1176,7 +1400,38 @@
       if (row) api("RevealItem", row.id).catch((error) => toast(error.message, true));
     });
 
+    rowsEl.addEventListener("contextmenu", (event) => {
+      const rowElement = event.target.closest(".row");
+      if (!rowElement) return;
+      const row = getRow(Number(rowElement.dataset.index));
+      if (!row) return;
+      event.preventDefault();
+      showRowContextMenu(event, row);
+    });
+
+    contextMenu.addEventListener("click", (event) => {
+      const copyButton = event.target.closest("[data-copy-field]");
+      if (copyButton) {
+        const row = state.contextRow;
+        if (row) copyText(row[copyButton.dataset.copyField]);
+        hideContextMenu();
+        return;
+      }
+      const actionButton = event.target.closest("[data-menu-action]");
+      if (actionButton && actionButton.dataset.menuAction === "reveal") {
+        const row = state.contextRow;
+        hideContextMenu();
+        if (row) api("RevealItem", row.id).catch((error) => toast(error.message, true));
+      }
+    });
+
     detailPane.addEventListener("click", (event) => {
+      const copyButton = event.target.closest('[data-action="copy"]');
+      if (copyButton) {
+        const item = state.detailItem;
+        if (item) copyText(item[copyButton.dataset.field]);
+        return;
+      }
       const button = event.target.closest('[data-action="reveal"]');
       if (!button) return;
       api("RevealItem", button.dataset.id).catch((error) => toast(error.message, true));
@@ -1189,6 +1444,7 @@
       updateSelectionUI();
       renderRows();
     });
+    resetColumnsBtn.addEventListener("click", resetColumnWidths);
     deleteBtn.addEventListener("click", beginDelete);
     warningBadge.addEventListener("click", showWarnings);
     modalClose.addEventListener("click", closeModal);
@@ -1201,12 +1457,20 @@
     });
     settingsBtn.addEventListener("click", showSettings);
 
+    document.addEventListener("click", (event) => {
+      if (!contextMenu.contains(event.target)) hideContextMenu();
+    });
+
     document.addEventListener("keydown", (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
         event.preventDefault();
         searchInput.focus();
         searchInput.select();
       } else if (event.key === "Escape") {
+        if (!contextMenu.classList.contains("hidden")) {
+          hideContextMenu();
+          return;
+        }
         if (!modal.classList.contains("hidden")) closeModal();
       }
     });
@@ -1222,6 +1486,9 @@
   }
 
   async function init() {
+    loadColumnWidths();
+    applyColumnWidths();
+    setupColumnResizers();
     bindEvents();
     const ready = await waitForAPI(6000);
     bindRuntimeEvents();

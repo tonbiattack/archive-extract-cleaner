@@ -41,6 +41,7 @@ type App struct {
 	limits        model.Limits
 	configPath    string
 	configWarning string
+	mover         removal.Mover
 }
 
 type ScanInfo struct {
@@ -89,6 +90,7 @@ func NewApp() *App {
 		logPath:    logger.Path(),
 		limits:     cfg.Limits,
 		configPath: configPath,
+		mover:      removal.MoveToRecycleBin,
 	}
 	if configErr != nil {
 		app.configWarning = "設定ファイルを読み込めないため既定値を使用します: " + configErr.Error()
@@ -320,7 +322,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 		return DeleteResponse{}, errors.New("明示的な確認が必要です")
 	}
 	if len(ids) == 0 {
-		return DeleteResponse{}, errors.New("削除対象が選択されていません")
+		return DeleteResponse{}, errors.New("移動対象が選択されていません")
 	}
 	a.mu.Lock()
 	if a.deleting || a.scanning {
@@ -336,6 +338,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 	limits := a.limits
 	logger := a.log
 	index := a.index
+	mover := a.mover
 	a.deleting = true
 	a.mu.Unlock()
 
@@ -366,9 +369,9 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			skipped++
 			results = append(results, model.DeleteResult{
 				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Skipped: true, Reason: "削除可能な項目ではありません", LogPath: a.logPath,
+				Skipped: true, Reason: "移動可能な項目ではありません", LogPath: a.logPath,
 			})
-			a.appendLog(logger, item, false, "削除可能な項目ではありません")
+			a.appendLog(logger, item, false, "移動可能な項目ではありません")
 			continue
 		}
 
@@ -391,8 +394,8 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			continue
 		}
 
-		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "deleting"})
-		removalResult := removal.Delete(base, item.FolderPath, roots)
+		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "recycling"})
+		removalResult := removal.Delete(base, item.FolderPath, roots, mover)
 		now := time.Now()
 		logItem := item
 		if removalResult.Success {
@@ -402,7 +405,7 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			item.DeleteError = ""
 			item.Details = nil
 			item.MatchMode = ""
-			item.Reason = "解凍済みフォルダを削除しました"
+			item.Reason = "Windowsのごみ箱に移動しました"
 			item.Size = item.ZipSize
 			deleted++
 			results = append(results, model.DeleteResult{
@@ -411,14 +414,10 @@ func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, erro
 			})
 			a.appendLog(logger, logItem, true, "")
 		} else {
-			reason := removalResult.Reason
-			if removalResult.Quarantined != "" {
-				reason += "（退避先: " + removalResult.Quarantined + "）"
-			}
 			item.Verdict = model.VerdictUnverified
 			item.Status = model.StatusError
-			item.Reason = "削除に失敗しました: " + reason
-			item.DeleteError = reason
+			item.Reason = "ごみ箱への移動に失敗しました: " + removalResult.Reason
+			item.DeleteError = removalResult.Reason
 			item.CheckedAt = now
 			failed++
 			results = append(results, model.DeleteResult{
@@ -455,7 +454,7 @@ func (a *App) appendLog(logger *oplog.Logger, item model.Item, success bool, mes
 	}
 	err := logger.Append(oplog.Entry{
 		Time:       time.Now(),
-		Action:     "delete",
+		Action:     "recycle",
 		ID:         item.ID,
 		ZipPath:    item.ZipPath,
 		FolderPath: item.FolderPath,
@@ -518,6 +517,19 @@ func (a *App) RevealItem(id string) error {
 		return a.OpenInExplorer(item.ZipPath)
 	}
 	return errors.New("開けるパスがありません")
+}
+
+func (a *App) CopyText(text string) error {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		return errors.New("アプリケーションが初期化されていません")
+	}
+	if text == "" {
+		return errors.New("コピーするテキストがありません")
+	}
+	return wailsruntime.ClipboardSetText(ctx, text)
 }
 
 func (a *App) OpenConfig() error {

@@ -2,22 +2,21 @@ package removal
 
 import (
 	"context"
+	"errors"
 	"os"
-	"path/filepath"
-	"strconv"
-	"time"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/fswalk"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
 
+type Mover func(folder string) error
+
 type Result struct {
-	Success     bool
-	Reason      string
-	Quarantined string
+	Success bool
+	Reason  string
 }
 
-func Delete(ctx context.Context, folder string, roots []string) Result {
+func Delete(ctx context.Context, folder string, roots []string, mover Mover) Result {
 	if err := ctx.Err(); err != nil {
 		return Result{Reason: err.Error()}
 	}
@@ -27,7 +26,7 @@ func Delete(ctx context.Context, folder string, roots []string) Result {
 	}
 	for _, root := range roots {
 		if winpath.EqualPath(root, abs) {
-			return Result{Reason: "スキャン対象ルート自身は削除できません"}
+			return Result{Reason: "スキャン対象ルート自身は移動できません"}
 		}
 	}
 	allowed := false
@@ -40,65 +39,38 @@ func Delete(ctx context.Context, folder string, roots []string) Result {
 		}
 	}
 	if !allowed {
-		return Result{Reason: "対象ルートの外にあるフォルダは削除できません"}
+		return Result{Reason: "対象ルートの外にあるフォルダは移動できません"}
 	}
 	if err := winpath.CheckNoReparseAncestors(matchedRoot, abs); err != nil {
-		return Result{Reason: "安全を確認できないため削除を中止しました: " + err.Error()}
+		return Result{Reason: "安全を確認できないため移動を中止しました: " + err.Error()}
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
 		return Result{Reason: "フォルダを確認できません: " + err.Error()}
 	}
 	if !info.IsDir() {
-		return Result{Reason: "削除対象がフォルダではありません"}
+		return Result{Reason: "移動対象がフォルダではありません"}
 	}
 	reparse, err := winpath.IsReparsePoint(abs)
 	if err != nil {
 		return Result{Reason: "リンク/ジャンクションを確認できません: " + err.Error()}
 	}
 	if reparse {
-		return Result{Reason: "リンク/ジャンクションは削除できません"}
+		return Result{Reason: "リンク/ジャンクションは移動できません"}
 	}
 	if err := fswalk.CheckNoLinks(ctx, abs); err != nil {
-		return Result{Reason: "安全を確認できないため削除を中止しました: " + err.Error()}
+		return Result{Reason: "安全を確認できないため移動を中止しました: " + err.Error()}
 	}
-
-	parent := filepath.Dir(abs)
-	base := filepath.Base(abs)
-	stamp := strconv.FormatInt(time.Now().UnixNano(), 36)
-	quarantine := filepath.Join(parent, "."+base+".deleting-"+stamp)
-	if _, err := os.Lstat(quarantine); err == nil {
-		return Result{Reason: "一時退避先が既に存在します"}
+	if mover == nil {
+		mover = MoveToRecycleBin
 	}
-	if err := os.Rename(abs, quarantine); err != nil {
-		return Result{Reason: "削除前の退避に失敗しました: " + err.Error()}
+	if err := mover(abs); err != nil {
+		return Result{Reason: "Windowsのごみ箱に移動できませんでした: " + err.Error()}
 	}
-	restore := func(reason string) Result {
-		if renameErr := os.Rename(quarantine, abs); renameErr != nil {
-			return Result{Reason: reason + "（元に戻せませんでした: " + renameErr.Error() + "）", Quarantined: quarantine}
-		}
-		return Result{Reason: reason}
+	if _, err := os.Lstat(abs); err == nil {
+		return Result{Reason: "ごみ箱への移動後も元のパスが存在します"}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Result{Reason: "移動後の状態を確認できません: " + err.Error()}
 	}
-
-	info, err = os.Lstat(quarantine)
-	if err != nil {
-		return restore("退避後の確認に失敗しました: " + err.Error())
-	}
-	if !info.IsDir() {
-		return restore("退避先がフォルダではありません")
-	}
-	reparse, err = winpath.IsReparsePoint(quarantine)
-	if err != nil {
-		return restore("退避先の確認に失敗しました: " + err.Error())
-	}
-	if reparse {
-		return restore("退避先がリンク/ジャンクションです")
-	}
-	if err := fswalk.CheckNoLinks(ctx, quarantine); err != nil {
-		return restore("退避後にリンクを検出しました: " + err.Error())
-	}
-	if err := os.RemoveAll(quarantine); err != nil {
-		return Result{Reason: "削除に失敗しました: " + err.Error(), Quarantined: quarantine}
-	}
-	return Result{Success: true, Reason: "削除しました"}
+	return Result{Success: true, Reason: "Windowsのごみ箱に移動しました"}
 }

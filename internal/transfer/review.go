@@ -35,12 +35,14 @@ type Review struct {
 }
 
 type LaunchResult struct {
-	Launched     bool   `json:"launched"`
-	Mode         string `json:"mode"`
-	PathCount    int    `json:"pathCount"`
-	ScriptPath   string `json:"scriptPath"`
-	Preset       string `json:"preset"`
-	ManifestPath string `json:"manifestPath,omitempty"`
+	Launched      bool   `json:"launched"`
+	Mode          string `json:"mode"`
+	PathCount     int    `json:"pathCount"`
+	ScriptPath    string `json:"scriptPath"`
+	Preset        string `json:"preset"`
+	PresetSkipped bool   `json:"presetSkipped"`
+	Warning       string `json:"warning,omitempty"`
+	ManifestPath  string `json:"manifestPath,omitempty"`
 }
 
 type reviewBuilder struct {

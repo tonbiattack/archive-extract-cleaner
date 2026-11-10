@@ -23,10 +23,17 @@ func writeFakeScript(t *testing.T, outputPath string) string {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "fake-multi-drive-copy.ps1")
 	escapedOutput := strings.ReplaceAll(outputPath, "'", "''")
-	script := `param(
+	script := `[CmdletBinding(PositionalBinding = $false)]
+param(
     [string]$Preset,
+    [string]$SourceListFile,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Sources
 )
+if ($SourceListFile) {
+    $data = Get-Content -LiteralPath $SourceListFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $data.sources) { throw 'sources array is required' }
+    $Sources = @($data.sources)
+}
 $result = [ordered]@{ preset = [string]$Preset; sources = @($Sources | ForEach-Object { [string]$_ }) }
 $json = $result | ConvertTo-Json -Compress -Depth 4
 [IO.File]::WriteAllText('` + escapedOutput + `', $json, (New-Object Text.UTF8Encoding($false)))
@@ -68,8 +75,8 @@ func TestLaunchPassesSpecialCharactersAsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Mode != "args" {
-		t.Fatalf("mode = %s", result.Mode)
+	if result.Mode != "args" || result.PresetSkipped {
+		t.Fatalf("result = %+v", result)
 	}
 	got := readFakeResult(t, output)
 	if got.Preset != "Backup プリセット" {
@@ -85,24 +92,27 @@ func TestLaunchPassesSpecialCharactersAsArguments(t *testing.T) {
 	}
 }
 
-func TestLaunchUsesManifestForLongPathLists(t *testing.T) {
+func TestLaunchUsesSourceListFileForLongPathLists(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "result.json")
 	script := writeFakeScript(t, output)
 	paths := make([]string, 80)
 	for index := range paths {
 		paths[index] = fmt.Sprintf(`C:\長い パス\日本語 フォルダ %02d\%s.zip`, index, strings.Repeat("長い名前 ", 120))
 	}
-	result, err := Launch(paths, script, "")
+	result, err := Launch(paths, script, "Backup")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Mode != "manifest" || result.ManifestPath == "" {
 		t.Fatalf("result = %+v", result)
 	}
+	if !result.PresetSkipped || result.Warning == "" {
+		t.Fatalf("preset should be explicitly skipped: %+v", result)
+	}
 	defer os.Remove(result.ManifestPath)
 	got := readFakeResult(t, output)
 	if got.Preset != "" {
-		t.Fatalf("preset = %q", got.Preset)
+		t.Fatalf("manifest mode must not pass a preset: %q", got.Preset)
 	}
 	if len(got.Sources) != len(paths) {
 		t.Fatalf("sources = %d, want %d", len(got.Sources), len(paths))
@@ -111,5 +121,26 @@ func TestLaunchUsesManifestForLongPathLists(t *testing.T) {
 		if got.Sources[index] != expected {
 			t.Fatalf("source[%d] = %q, want %q", index, got.Sources[index], expected)
 		}
+	}
+}
+
+func TestLaunchUsesSourceListFileWithoutPreset(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "result.json")
+	script := writeFakeScript(t, output)
+	paths := make([]string, 80)
+	for index := range paths {
+		paths[index] = fmt.Sprintf(`C:\長い パス\%02d\%s.zip`, index, strings.Repeat("名前 ", 130))
+	}
+	result, err := Launch(paths, script, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PresetSkipped || result.Warning != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	defer os.Remove(result.ManifestPath)
+	got := readFakeResult(t, output)
+	if len(got.Sources) != len(paths) {
+		t.Fatalf("sources = %d, want %d", len(got.Sources), len(paths))
 	}
 }

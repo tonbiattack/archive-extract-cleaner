@@ -365,6 +365,7 @@ input {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 8px 18px;
   background: var(--panel);
@@ -1049,6 +1050,96 @@ input[type="checkbox"]:disabled {
 
 .delete-progress {
   margin-top: 12px;
+}
+
+/* Transfer review */
+.transfer-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-alt);
+  font-weight: 600;
+}
+
+.transfer-preview {
+  max-height: 170px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transfer-review-list {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.transfer-review-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid #eff2f5;
+  cursor: pointer;
+}
+
+.transfer-review-item:last-child {
+  border-bottom: 0;
+}
+
+.transfer-review-item:hover {
+  background: #f7f9fc;
+}
+
+.transfer-review-item.missing {
+  background: #fff7f6;
+}
+
+.transfer-review-item input[type="checkbox"] {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.transfer-review-item .badge {
+  flex: 0 0 auto;
+}
+
+.transfer-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.transfer-reason {
+  flex: 1;
+  min-width: 120px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.transfer-selection-summary {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 /* Context menu */

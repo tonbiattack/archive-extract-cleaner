@@ -40,10 +40,18 @@
     configPath: "",
     configWarning: "",
     limits: null,
+    multiDriveCopyScript: "",
+    multiDriveCopyPreset: "",
+    multiDriveCopyAvailable: false,
     deleteTotal: 0,
     columnWidths: COLUMNS.map((column) => column.def),
     contextRow: null,
     detailItem: null,
+    transferCandidates: [],
+    transferReview: null,
+    transferRecommendedChecked: false,
+    transferReviewSelected: new Set(),
+    transferPaths: [],
   };
 
   const el = (id) => document.getElementById(id);
@@ -70,6 +78,7 @@
   const selectAllBtn = el("selectAllBtn");
   const clearSelectionBtn = el("clearSelectionBtn");
   const resetColumnsBtn = el("resetColumnsBtn");
+  const transferBtn = el("transferBtn");
   const progressPanel = el("progressPanel");
   const progressLabel = el("progressLabel");
   const progressMeta = el("progressMeta");
@@ -773,8 +782,11 @@
       "<dt>合計展開サイズ上限</dt><dd>" + esc(limits.maxTotalBytes ? fmtBytes(limits.maxTotalBytes) : "—") + "</dd>" +
       "<dt>単一ファイル上限</dt><dd>" + esc(limits.maxFileBytes ? fmtBytes(limits.maxFileBytes) : "—") + "</dd>" +
       "<dt>圧縮率上限</dt><dd>" + esc(limits.maxCompressionRatio || "—") + "</dd>" +
+      "<dt>multi-drive-copy</dt><dd>" + esc(state.multiDriveCopyScript || "—") + (state.multiDriveCopyAvailable ? "" : "（未検出）") + "</dd>" +
+      "<dt>転送プリセット</dt><dd>" + esc(state.multiDriveCopyPreset || "設定画面を開く") + "</dd>" +
       "</dl>" +
-      '<p class="modal-note">上限を超えたZIPやフォルダは UNVERIFIED となり、削除候補にはなりません。設定ファイルを変更した場合はアプリを再起動してください。</p>';
+      '<p class="modal-note">上限を超えたZIPやフォルダは UNVERIFIED となり、削除候補にはなりません。設定ファイルを変更した場合はアプリを再起動してください。</p>' +
+      '<p class="modal-note">multi-drive-copy のスクリプトとプリセットは設定ファイルの <code>multiDriveCopy</code> で指定します。プリセット未指定時は multi-drive-copy の設定画面が開きます。</p>';
     if (state.configWarning) {
       body += '<p class="modal-note">' + esc(state.configWarning) + "</p>";
     }
@@ -1195,6 +1207,236 @@
     });
   }
 
+  // ---------- multi-drive-copy transfer ----------
+
+  async function openTransferReview() {
+    if (state.busy) {
+      toast("処理中は転送を開始できません", true);
+      return;
+    }
+    transferBtn.disabled = true;
+    try {
+      const review = await api("GetTransferReview");
+      if (!review || !Array.isArray(review.candidates) || review.candidates.length === 0) {
+        toast("転送できるZIPまたはフォルダがありません");
+        return;
+      }
+      showTransferReview(review);
+    } catch (error) {
+      toast("転送候補の取得に失敗しました: " + error.message, true);
+    } finally {
+      transferBtn.disabled = state.busy;
+    }
+  }
+
+  function transferGroups(review) {
+    const candidates = review.candidates || [];
+    return {
+      recommended: candidates.filter((candidate) => !candidate.review),
+      review: candidates.filter((candidate) => candidate.review),
+    };
+  }
+
+  function showTransferReview(review) {
+    state.transferReview = review;
+    state.transferCandidates = review.candidates || [];
+    const groups = transferGroups(review);
+    state.transferRecommendedChecked = groups.recommended.some((candidate) => candidate.selected && candidate.exists);
+    state.transferReviewSelected = new Set(
+      groups.review.filter((candidate) => candidate.selected && candidate.exists).map((candidate) => candidate.id)
+    );
+    openModal({
+      title: "残ったデータをmulti-drive-copyへ引き渡す",
+      wide: true,
+      body: transferReviewBody(review),
+      actions: [
+        { label: "全選択", id: "transferSelectAllBtn", className: "btn", onClick: transferSelectAll },
+        { label: "全解除", id: "transferClearBtn", className: "btn", onClick: transferClear },
+        {
+          label: "multi-drive-copyを起動",
+          id: "transferLaunchBtn",
+          className: "btn primary",
+          onClick: launchTransfer,
+        },
+        { label: "閉じる", className: "btn", onClick: closeModal },
+      ],
+    });
+    updateTransferSelection();
+  }
+
+  function transferReviewBody(review) {
+    const groups = transferGroups(review);
+    const recommendedExisting = groups.recommended.filter((candidate) => candidate.exists);
+    let html =
+      '<div class="stat-row">' +
+      '<div class="stat"><div class="stat-label">転送候補</div><div class="stat-value">' + groups.recommended.length + groups.review.length + "</div></div>" +
+      '<div class="stat"><div class="stat-label">推奨（ZIP優先）</div><div class="stat-value result-ok">' + recommendedExisting.length + "</div></div>" +
+      '<div class="stat"><div class="stat-label">要確認</div><div class="stat-value">' + groups.review.length + "</div></div>" +
+      '<div class="stat"><div class="stat-label">パス消失</div><div class="stat-value result-fail">' + review.missingCount + "</div></div>" +
+      "</div>" +
+      '<p class="muted">ZIPが存在して内容一致する組はZIPだけを推奨します。フォルダしかない場合はフォルダを推奨します。不一致・未検証・曖昧な組は要確認として表示し、既定では選択しません。</p>';
+    if (!review.scriptAvailable) {
+      html +=
+        '<p class="modal-note">multi-drive-copy のスクリプトが見つかりません: ' +
+        esc(review.scriptPath || "未設定") +
+        "<br>設定ファイルの <code>multiDriveCopy.scriptPath</code> を確認してください。</p>";
+    }
+    if (review.busy) {
+      html += '<p class="modal-note">スキャンまたはごみ箱移動の処理中です。完了後に再度開いてください。</p>';
+    }
+    if (groups.recommended.length) {
+      html +=
+        '<label class="transfer-group"><input type="checkbox" id="transferRecommended" ' +
+        (state.transferRecommendedChecked ? "checked" : "") +
+        (recommendedExisting.length ? "" : " disabled") +
+        "> 推奨 " +
+        recommendedExisting.length +
+        " 件（ZIP優先）を転送対象にする</label>" +
+        '<div class="transfer-preview">' +
+        esc(groups.recommended.map((candidate) => candidate.path).join("\n")) +
+        "</div>";
+    }
+    html += '<div class="detail-title" style="margin-top:14px">要確認（明示選択）</div>';
+    if (groups.review.length) {
+      html +=
+        '<div class="transfer-review-list">' +
+        groups.review
+          .map((candidate) => {
+            const checked = state.transferReviewSelected.has(candidate.id);
+            return (
+              '<label class="transfer-review-item' +
+              (candidate.exists ? "" : " missing") +
+              '"><input type="checkbox" data-transfer-review="' +
+              esc(candidate.id) +
+              '" ' +
+              (checked ? "checked" : "") +
+              (candidate.exists ? "" : " disabled") +
+              "><span class=\"badge v-" +
+              esc(candidate.verdict) +
+              '">' +
+              esc(VERDICT_LABEL[candidate.verdict] || candidate.verdict) +
+              '</span><span class="transfer-path">' +
+              esc(candidate.path) +
+              '</span><span class="transfer-reason">' +
+              esc(candidate.reason) +
+              "</span>" +
+              (candidate.exists ? "" : '<span class="result-fail">パス消失</span>') +
+              "</label>"
+            );
+          })
+          .join("") +
+        "</div>";
+    } else {
+      html += '<p class="muted">要確認の項目はありません。</p>';
+    }
+    html += '<div id="transferSelectionSummary" class="transfer-selection-summary"></div>';
+    return html;
+  }
+
+  function updateTransferSelection() {
+    const review = state.transferReview;
+    if (!review) return;
+    const groups = transferGroups(review);
+    const recommendedBox = document.getElementById("transferRecommended");
+    state.transferRecommendedChecked = !!(recommendedBox && recommendedBox.checked);
+    const seen = new Set();
+    const paths = [];
+    let selectedRecommended = 0;
+    let selectedReview = 0;
+    const add = (candidate) => {
+      if (!candidate.exists) return;
+      const key = candidate.path.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      paths.push(candidate.path);
+    };
+    if (state.transferRecommendedChecked) {
+      groups.recommended.forEach((candidate) => {
+        if (candidate.exists) {
+          add(candidate);
+          selectedRecommended++;
+        }
+      });
+    }
+    groups.review.forEach((candidate) => {
+      if (state.transferReviewSelected.has(candidate.id) && candidate.exists) {
+        add(candidate);
+        selectedReview++;
+      }
+    });
+    state.transferPaths = paths;
+    const summary = document.getElementById("transferSelectionSummary");
+    if (summary) {
+      summary.textContent =
+        "転送対象: " +
+        paths.length +
+        " 件（推奨 " +
+        selectedRecommended +
+        " / 要確認 " +
+        selectedReview +
+        "）";
+    }
+    const launch = document.getElementById("transferLaunchBtn");
+    if (launch) {
+      launch.disabled = paths.length === 0 || review.busy || !review.scriptAvailable;
+    }
+  }
+
+  function transferSelectAll() {
+    const review = state.transferReview;
+    if (!review) return;
+    const recommendedBox = document.getElementById("transferRecommended");
+    if (recommendedBox && !recommendedBox.disabled) recommendedBox.checked = true;
+    state.transferRecommendedChecked = !!(recommendedBox && recommendedBox.checked);
+    state.transferReviewSelected = new Set(
+      transferGroups(review).review.filter((candidate) => candidate.exists).map((candidate) => candidate.id)
+    );
+    modalBody.querySelectorAll("[data-transfer-review]").forEach((box) => {
+      if (!box.disabled) box.checked = true;
+    });
+    updateTransferSelection();
+  }
+
+  function transferClear() {
+    const recommendedBox = document.getElementById("transferRecommended");
+    if (recommendedBox) recommendedBox.checked = false;
+    state.transferRecommendedChecked = false;
+    state.transferReviewSelected = new Set();
+    modalBody.querySelectorAll("[data-transfer-review]").forEach((box) => {
+      if (!box.disabled) box.checked = false;
+    });
+    updateTransferSelection();
+  }
+
+  async function launchTransfer() {
+    const review = state.transferReview;
+    if (!review) return;
+    if (!review.scriptAvailable) {
+      toast("multi-drive-copy のスクリプトが見つかりません", true);
+      return;
+    }
+    const paths = state.transferPaths.slice();
+    if (paths.length === 0) {
+      toast("転送対象が選択されていません", true);
+      return;
+    }
+    const launch = document.getElementById("transferLaunchBtn");
+    if (launch) launch.disabled = true;
+    try {
+      const result = await api("LaunchMultiDriveCopy", paths);
+      closeModal();
+      const mode = result && result.mode === "manifest" ? "（大量パスのためマニフェスト経由）" : "";
+      toast(
+        "multi-drive-copy を起動しました" +
+          mode +
+          "。コピーは multi-drive-copy の画面で開始・確認してください。結果は本アプリでは判定しません。"
+      );
+    } catch (error) {
+      toast("multi-drive-copy を起動できませんでした: " + error.message, true);
+      if (launch) launch.disabled = false;
+    }
+  }
+
   // ---------- modal ----------
 
   function openModal(options) {
@@ -1206,6 +1448,7 @@
       const button = document.createElement("button");
       button.className = action.className || "btn";
       button.textContent = action.label;
+      if (action.id) button.id = action.id;
       if (action.disabled) button.disabled = true;
       button.addEventListener("click", action.onClick);
       modalActions.appendChild(button);
@@ -1228,6 +1471,7 @@
     addRootBtn.disabled = state.busy;
     rootInput.disabled = state.busy;
     selectAllBtn.disabled = state.busy;
+    transferBtn.disabled = state.busy;
     deleteBtn.disabled = state.busy || state.selected.size === 0;
     clearSelectionBtn.disabled = state.selected.size === 0;
     rootList.querySelectorAll("button").forEach((button) => {
@@ -1445,9 +1689,24 @@
       renderRows();
     });
     resetColumnsBtn.addEventListener("click", resetColumnWidths);
+    transferBtn.addEventListener("click", openTransferReview);
     deleteBtn.addEventListener("click", beginDelete);
     warningBadge.addEventListener("click", showWarnings);
     modalClose.addEventListener("click", closeModal);
+    modalBody.addEventListener("change", (event) => {
+      if (event.target.id === "transferRecommended") {
+        state.transferRecommendedChecked = !!event.target.checked;
+        updateTransferSelection();
+        return;
+      }
+      if (event.target.matches("[data-transfer-review]")) {
+        const id = event.target.dataset.transferReview;
+        if (!id) return;
+        if (event.target.checked) state.transferReviewSelected.add(id);
+        else state.transferReviewSelected.delete(id);
+        updateTransferSelection();
+      }
+    });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) closeModal();
     });
@@ -1514,6 +1773,9 @@
         state.configPath = info.configPath || "";
         state.configWarning = info.configWarning || "";
         state.limits = info.limits || null;
+        state.multiDriveCopyScript = info.multiDriveCopyScript || "";
+        state.multiDriveCopyPreset = info.multiDriveCopyPreset || "";
+        state.multiDriveCopyAvailable = !!info.multiDriveCopyAvailable;
         if (info.version) versionText.textContent = "v" + info.version;
         if (info.configWarning) toast(info.configWarning, true);
         renderRoots();

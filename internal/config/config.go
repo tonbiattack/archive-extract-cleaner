@@ -5,12 +5,19 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 )
 
+type MultiDriveCopy struct {
+	ScriptPath string `json:"scriptPath"`
+	Preset     string `json:"preset"`
+}
+
 type Config struct {
-	Limits model.Limits `json:"limits"`
+	Limits         model.Limits   `json:"limits"`
+	MultiDriveCopy MultiDriveCopy `json:"multiDriveCopy"`
 }
 
 func Default() Config {
@@ -62,6 +69,8 @@ func normalize(cfg *Config) {
 	if cfg.Limits.MaxCompressionRatio == 0 {
 		cfg.Limits.MaxCompressionRatio = defaults.MaxCompressionRatio
 	}
+	cfg.MultiDriveCopy.ScriptPath = strings.TrimSpace(cfg.MultiDriveCopy.ScriptPath)
+	cfg.MultiDriveCopy.Preset = strings.TrimSpace(cfg.MultiDriveCopy.Preset)
 }
 
 func WriteDefault(path string) error {

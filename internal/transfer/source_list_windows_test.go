@@ -103,6 +103,42 @@ func TestInstalledMultiDriveCopyReadsOurSourceList(t *testing.T) {
 	readSourceListWithCore(t, core)
 }
 
+func TestInstalledMultiDriveCopyValidatesOurManifest(t *testing.T) {
+	if os.Getenv("MULTI_DRIVE_COPY_CORE") != "" {
+		// Explicit core override is covered by the read compatibility test.
+		t.Skip("using MULTI_DRIVE_COPY_CORE override")
+	}
+	core := installedCorePath()
+	if core == "" {
+		t.Skip("LOCALAPPDATA is not set")
+	}
+	if _, err := os.Stat(core); err != nil {
+		t.Skipf("multi-drive-copy Core.ps1 is not installed: %v", err)
+	}
+	coreData, err := os.ReadFile(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(coreData, []byte("function Read-SourceListFile")) {
+		t.Skip("installed multi-drive-copy does not support -SourceListFile yet")
+	}
+	script := filepath.Join(filepath.Dir(core), "MultiDriveCopy.ps1")
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("MultiDriveCopy.ps1 is not installed: %v", err)
+	}
+	root := t.TempDir()
+	manifest, err := writeManifest(root, []string{
+		makeTestFile(t, filepath.Join(root, "日本語 フォルダ", "a.zip")),
+		makeTestFile(t, filepath.Join(root, "space folder", "b.txt")),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSourceList(script, manifest, 2); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestValidateSourceListWithFixture(t *testing.T) {
 	root := t.TempDir()
 	coreData, err := os.ReadFile(filepath.Join("testdata", "read-source-list-fixture.ps1"))

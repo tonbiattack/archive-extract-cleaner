@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>archive-extract-cleaner</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div class="brand-text">
+          <h1>archive-extract-cleaner</h1>
+          <p>ZIPと解凍済みフォルダの安全な照合</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="settingsBtn" class="btn ghost">設定</button>
+        <button id="openLogBtn" class="btn ghost" title="削除操作ログをエクスプローラーで開く">操作ログ</button>
+        <span id="versionText" class="version"></span>
+      </div>
+    </header>
+
+    <section class="roots-panel">
+      <div class="panel-label">
+        <span>対象フォルダ</span>
+        <span id="rootCount" class="muted"></span>
+      </div>
+      <div id="rootList" class="root-list"></div>
+      <div class="root-add">
+        <input id="rootInput" type="text" spellcheck="false" placeholder="例: C:\Users\me\Downloads" autocomplete="off">
+        <button id="addRootBtn" class="btn">追加</button>
+        <button id="browseBtn" class="btn">フォルダを選択</button>
+        <button id="scanBtn" class="btn primary">スキャン</button>
+        <button id="stopBtn" class="btn danger" disabled>停止</button>
+      </div>
+    </section>
+
+    <section id="progressPanel" class="progress-panel hidden">
+      <div class="progress-head">
+        <span id="progressLabel">準備中</span>
+        <span id="progressMeta"></span>
+      </div>
+      <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressPath" class="progress-path"></div>
+    </section>
+
+    <section class="toolbar">
+      <div class="search-box">
+        <span class="search-icon">⌕</span>
+        <input id="searchInput" type="text" spellcheck="false" placeholder="名前・パスを検索 (Ctrl+F)" autocomplete="off">
+      </div>
+      <div id="filterBar" class="filters" role="group" aria-label="判定フィルタ">
+        <button class="filter active" data-filter="all">全件</button>
+        <button class="filter" data-filter="candidate">削除候補</button>
+        <button class="filter" data-filter="mismatch">不一致</button>
+        <button class="filter" data-filter="unverified">未検証</button>
+        <button class="filter" data-filter="keep">保持</button>
+      </div>
+      <div class="toolbar-actions">
+        <button id="selectAllBtn" class="btn">候補を全選択</button>
+        <button id="clearSelectionBtn" class="btn">選択解除</button>
+      </div>
+    </section>
+
+    <section class="summary-bar">
+      <div id="summaryChips" class="summary-chips"></div>
+      <div id="warningBadge" class="warning-badge hidden" title="走査中の警告"></div>
+    </section>
+
+    <main class="content">
+      <div class="table-wrap">
+        <div id="tableScroll" class="table-scroll">
+          <div id="tableHeader" class="table-header">
+            <div class="cell check"></div>
+            <button class="cell sort" data-sort="verdict">判定<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="name">名前<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="zip">ZIP<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="folder">解凍済みフォルダ<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="parent">親パス<span class="arrow"></span></button>
+            <button class="cell sort numeric" data-sort="size">サイズ<span class="arrow"></span></button>
+            <button class="cell sort" data-sort="reason">理由<span class="arrow"></span></button>
+          </div>
+          <div id="virtual" class="virtual">
+            <div id="rows" class="rows"></div>
+          </div>
+          <div id="emptyState" class="empty-state">
+            <div class="empty-title">まだスキャンしていません</div>
+            <div class="empty-text">対象フォルダを追加して「スキャン」を押してください。スキャンは読み取り専用です。</div>
+          </div>
+        </div>
+      </div>
+
+      <aside id="detailPane" class="detail-pane">
+        <div class="detail-empty">
+          <div class="detail-title">詳細</div>
+          <p>行を選択すると、ZIPとフォルダの対応・一致根拠・差異を表示します。</p>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <div id="statusText" class="status-text">待機中</div>
+      <div class="status-right">
+        <span id="selectionInfo" class="selection-info">選択 0 件</span>
+        <button id="deleteBtn" class="btn danger" disabled>選択項目を削除</button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card" id="modalCard">
+      <div class="modal-head">
+        <h2 id="modalTitle"></h2>
+        <button id="modalClose" class="icon-btn" aria-label="閉じる">×</button>
+      </div>
+      <div id="modalBody" class="modal-body"></div>
+      <div id="modalActions" class="modal-actions"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

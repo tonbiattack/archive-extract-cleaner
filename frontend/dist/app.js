@@ -52,6 +52,7 @@
     transferRecommendedChecked: false,
     transferReviewSelected: new Set(),
     transferPaths: [],
+    transferLaunched: false,
   };
 
   const el = (id) => document.getElementById(id);
@@ -719,6 +720,7 @@
     const summary = state.summary;
     if (!summary) {
       summaryChips.innerHTML = '<span class="chip">総件数 <strong>0</strong></span>';
+      updateWorkflow();
       return;
     }
     const byVerdict = summary.byVerdict || {};
@@ -742,6 +744,37 @@
       chips.push('<span class="chip">所要時間 <strong>' + esc(fmtDuration(summary.durationMs)) + "</strong></span>");
     }
     summaryChips.innerHTML = chips.join("");
+    updateWorkflow();
+  }
+
+  function hasScanResult() {
+    const summary = state.summary;
+    return !!(summary && summary.scannedAt && !String(summary.scannedAt).startsWith("0001-"));
+  }
+
+  function setWorkflowStep(bar, step, stateName) {
+    const element = bar.querySelector('[data-step="' + step + '"]');
+    if (!element) return;
+    element.classList.remove("active", "done");
+    if (stateName) element.classList.add(stateName);
+  }
+
+  function updateWorkflow() {
+    const bar = document.getElementById("workflowBar");
+    if (!bar) return;
+    const scanned = hasScanResult();
+    const launched = state.transferLaunched;
+    setWorkflowStep(bar, "organize", scanned ? "done" : "active");
+    setWorkflowStep(bar, "transfer", scanned ? "active" : "");
+    setWorkflowStep(bar, "cleanup", "");
+    const current = document.getElementById("workflowCurrent");
+    if (current) {
+      current.textContent = launched
+        ? "multi-drive-copyで転送・検証中。結果は受信側で確認"
+        : scanned
+        ? "転送対象をレビューしてください"
+        : "対象フォルダをスキャンしてください";
+    }
   }
 
   function renderWarnings() {
@@ -965,6 +998,7 @@
     state.selected.clear();
     state.activeId = null;
     state.summary = null;
+    state.transferLaunched = false;
     state.warnings = [];
     state.warningTotal = 0;
     renderWarnings();
@@ -1274,7 +1308,8 @@
       '<div class="stat"><div class="stat-label">要確認</div><div class="stat-value">' + groups.review.length + "</div></div>" +
       '<div class="stat"><div class="stat-label">パス消失</div><div class="stat-value result-fail">' + review.missingCount + "</div></div>" +
       "</div>" +
-      '<p class="muted">ZIPが存在して内容一致する組はZIPだけを推奨します。フォルダしかない場合はフォルダを推奨します。不一致・未検証・曖昧な組は要確認として表示し、既定では選択しません。</p>';
+      '<p class="muted">ZIPが存在して内容一致する組はZIPだけを推奨します。フォルダしかない場合はフォルダを推奨します。不一致・未検証・曖昧な組は要確認として表示し、既定では選択しません。</p>' +
+      '<p class="muted">コピー先・プリセット・コピー後の全転送先検証・元データのごみ箱移動は multi-drive-copy の画面で設定・確認してください。</p>';
     if (!review.scriptAvailable) {
       html +=
         '<p class="modal-note">multi-drive-copy のスクリプトが見つかりません: ' +
@@ -1422,16 +1457,27 @@
     }
     const launch = document.getElementById("transferLaunchBtn");
     if (launch) launch.disabled = true;
+    state.transferLaunched = false;
+    updateWorkflow();
     try {
       const result = await api("LaunchMultiDriveCopy", paths);
+      state.transferLaunched = true;
+      updateWorkflow();
       closeModal();
-      const mode = result && result.mode === "manifest" ? "（大量パスのためマニフェスト経由）" : "";
-      toast(
-        "multi-drive-copy を起動しました" +
-          mode +
-          "。コピーは multi-drive-copy の画面で開始・確認してください。結果は本アプリでは判定しません。"
-      );
+      const mode = result && result.mode === "manifest" ? "（大量パスのため -SourceListFile 経由）" : "";
+      if (result && result.warning) {
+        toast(result.warning + " コピー結果は本アプリでは判定しません。", true);
+      } else {
+        toast(
+          "multi-drive-copy を起動しました" +
+            mode +
+            "。コピーは multi-drive-copy の画面で開始・確認してください。結果は本アプリでは判定しません。"
+        );
+      }
+      setStatus("multi-drive-copy を起動しました。転送結果は受信側で確認してください");
     } catch (error) {
+      state.transferLaunched = false;
+      updateWorkflow();
       toast("multi-drive-copy を起動できませんでした: " + error.message, true);
       if (launch) launch.disabled = false;
     }

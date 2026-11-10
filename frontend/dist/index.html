@@ -72,6 +72,24 @@
       <div id="warningBadge" class="warning-badge hidden" title="走査中の警告"></div>
     </section>
 
+    <section id="workflowBar" class="workflow-bar" aria-label="整理から転送までの作業フロー">
+      <div class="workflow-step" data-step="organize">
+        <span class="workflow-index">1</span>
+        <div><strong>整理</strong><small>本アプリ: 照合・ごみ箱移動</small></div>
+      </div>
+      <span class="workflow-arrow">→</span>
+      <div class="workflow-step" data-step="transfer">
+        <span class="workflow-index">2</span>
+        <div><strong>転送・検証</strong><small>multi-drive-copy: E/F/Gコピー・全転送先検証</small></div>
+      </div>
+      <span class="workflow-arrow">→</span>
+      <div class="workflow-step" data-step="cleanup">
+        <span class="workflow-index">3</span>
+        <div><strong>元データ整理</strong><small>multi-drive-copy: 検証後のごみ箱移動</small></div>
+      </div>
+      <span id="workflowCurrent" class="workflow-current"></span>
+    </section>
+
     <main class="content">
       <div class="table-wrap">
         <div id="tableScroll" class="table-scroll">

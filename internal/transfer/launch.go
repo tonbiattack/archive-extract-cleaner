@@ -1,20 +1,25 @@
 package transfer
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 	"unicode/utf16"
 )
 
 const maxCommandLineLength = 30000
 
-type manifestFile struct {
-	Paths  []string `json:"paths"`
-	Preset string   `json:"preset,omitempty"`
+const manifestMaxAge = 24 * time.Hour
+
+type sourceListFile struct {
+	Sources []string `json:"sources"`
 }
 
 func Launch(paths []string, scriptPath, preset string) (LaunchResult, error) {
@@ -47,22 +52,26 @@ func Launch(paths []string, scriptPath, preset string) (LaunchResult, error) {
 		if err != nil {
 			return LaunchResult{}, err
 		}
-		wrapperPath, err := ensureWrapper(dir)
+		cleanupOldManifests(dir, manifestMaxAge)
+		manifestPath, err := writeManifest(dir, paths)
 		if err != nil {
 			return LaunchResult{}, err
 		}
-		manifestPath, err := writeManifest(dir, paths, preset)
-		if err != nil {
+		if err := validateSourceList(scriptPath, manifestPath, len(paths)); err != nil {
+			os.Remove(manifestPath)
 			return LaunchResult{}, err
 		}
 		args = []string{
 			"-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-			"-File", wrapperPath,
-			"-Manifest", manifestPath,
-			"-TargetScript", scriptPath,
+			"-File", scriptPath,
+			"-SourceListFile", manifestPath,
 		}
 		result.Mode = "manifest"
 		result.ManifestPath = manifestPath
+		if preset != "" {
+			result.PresetSkipped = true
+			result.Warning = "multi-drive-copy は -Preset と -SourceListFile を併用できません。大量パスのためプリセット「" + preset + "」を適用せず、レビュー画面を開きます。"
+		}
 	}
 
 	command := exec.Command(powershell, args...)
@@ -71,6 +80,70 @@ func Launch(paths []string, scriptPath, preset string) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("multi-drive-copy を起動できません: %w", err)
 	}
 	return result, nil
+}
+
+func validateSourceList(scriptPath, manifestPath string, expected int) error {
+	corePath := filepath.Join(filepath.Dir(scriptPath), "MultiDriveCopy.Core.ps1")
+	coreData, err := os.ReadFile(corePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("multi-drive-copy のCoreスクリプトを確認できません: %w", err)
+	}
+	if !strings.Contains(string(coreData), "function Read-SourceListFile") {
+		return errors.New("multi-drive-copy が -SourceListFile に対応していません。multi-drive-copy を更新してください")
+	}
+	powershell, err := powershellPath()
+	if err != nil {
+		return err
+	}
+	dir, err := WorkDir()
+	if err != nil {
+		return err
+	}
+	runner, err := os.CreateTemp(dir, "validate-source-list-*.ps1")
+	if err != nil {
+		return err
+	}
+	runnerPath := runner.Name()
+	defer os.Remove(runnerPath)
+	script := `param(
+    [Parameter(Mandatory = $true)][string]$Core,
+    [Parameter(Mandatory = $true)][string]$Manifest
+)
+$ErrorActionPreference = 'Stop'
+. $Core
+$paths = @(Read-SourceListFile $Manifest)
+[Console]::Out.Write($paths.Count)
+`
+	if _, err := runner.WriteString(script); err != nil {
+		runner.Close()
+		return err
+	}
+	if err := runner.Close(); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", runnerPath, "-Core", corePath, "-Manifest", manifestPath)
+	command.Dir = filepath.Dir(corePath)
+	output, err := command.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return errors.New("multi-drive-copy のソースリスト読込検証がタイムアウトしました")
+	}
+	if err != nil {
+		return fmt.Errorf("multi-drive-copy がソースリストを読み込めません: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return fmt.Errorf("multi-drive-copy のソースリスト読込結果を解釈できません: %q", strings.TrimSpace(string(output)))
+	}
+	if count != expected {
+		return fmt.Errorf("multi-drive-copy のソースリスト読込件数が一致しません: %d / %d", count, expected)
+	}
+	return nil
 }
 
 func powershellPath() (string, error) {
@@ -112,7 +185,7 @@ func WorkDir() (string, error) {
 	return dir, nil
 }
 
-func writeManifest(dir string, paths []string, preset string) (string, error) {
+func writeManifest(dir string, paths []string) (string, error) {
 	file, err := os.CreateTemp(dir, "manifest-*.json")
 	if err != nil {
 		return "", err
@@ -120,7 +193,7 @@ func writeManifest(dir string, paths []string, preset string) (string, error) {
 	path := file.Name()
 	encoder := json.NewEncoder(file)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(manifestFile{Paths: paths, Preset: preset}); err != nil {
+	if err := encoder.Encode(sourceListFile{Sources: paths}); err != nil {
 		file.Close()
 		os.Remove(path)
 		return "", err
@@ -132,23 +205,20 @@ func writeManifest(dir string, paths []string, preset string) (string, error) {
 	return path, nil
 }
 
-func ensureWrapper(dir string) (string, error) {
-	path := filepath.Join(dir, "run-multi-drive-copy.ps1")
-	script := `param(
-    [Parameter(Mandatory = $true)][string]$Manifest,
-    [Parameter(Mandatory = $true)][string]$TargetScript
-)
-$ErrorActionPreference = 'Stop'
-$data = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$sources = @($data.paths | ForEach-Object { [string]$_ })
-if ($data.preset) {
-    & $TargetScript -Preset ([string]$data.preset) -Sources $sources
-} else {
-    & $TargetScript -Sources $sources
-}
-`
-	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
-		return "", err
+func cleanupOldManifests(dir string, maxAge time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
 	}
-	return path, nil
+	now := time.Now()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "manifest-") || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || now.Sub(info.ModTime()) <= maxAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }

@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf16"
 )
 
-func TestWriteManifestPreservesUnicodeAndSpecialCharacters(t *testing.T) {
+func TestWriteManifestUsesReceiverSchema(t *testing.T) {
 	dir := t.TempDir()
 	paths := []string{`C:\日本語 フォルダ\a&b #1.zip`, `C:\space folder\file (1).txt`}
-	path, err := writeManifest(dir, paths, "Backup プリセット")
+	path, err := writeManifest(dir, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,35 +21,49 @@ func TestWriteManifestPreservesUnicodeAndSpecialCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded manifestFile
+	var decoded struct {
+		Sources []string `json:"sources"`
+		Paths   []string `json:"paths"`
+	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Preset != "Backup プリセット" {
-		t.Fatalf("preset = %q", decoded.Preset)
+	if decoded.Paths != nil {
+		t.Fatalf("legacy paths property must not be written: %s", data)
 	}
-	if len(decoded.Paths) != len(paths) {
-		t.Fatalf("paths = %+v", decoded.Paths)
+	if len(decoded.Sources) != len(paths) {
+		t.Fatalf("sources = %+v", decoded.Sources)
 	}
 	for index, expected := range paths {
-		if decoded.Paths[index] != expected {
-			t.Fatalf("path[%d] = %q, want %q", index, decoded.Paths[index], expected)
+		if decoded.Sources[index] != expected {
+			t.Fatalf("source[%d] = %q, want %q", index, decoded.Sources[index], expected)
 		}
 	}
 }
 
-func TestEnsureWrapper(t *testing.T) {
+func TestCleanupOldManifests(t *testing.T) {
 	dir := t.TempDir()
-	path, err := ensureWrapper(dir)
-	if err != nil {
+	old := filepath.Join(dir, "manifest-old.json")
+	current := filepath.Join(dir, "manifest-new.json")
+	other := filepath.Join(dir, "keep.txt")
+	for _, path := range []string{old, current, other} {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	cleanupOldManifests(dir, 24*time.Hour)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old manifest was not removed: %v", err)
 	}
-	if !strings.Contains(string(data), "ConvertFrom-Json") || !strings.Contains(string(data), "$TargetScript") {
-		t.Fatalf("wrapper = %s", data)
+	if _, err := os.Stat(current); err != nil {
+		t.Fatalf("current manifest was removed: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("non-manifest file was removed: %v", err)
 	}
 }
 

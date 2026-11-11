@@ -349,6 +349,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 	summary.DurationMS = old.DurationMS
 	a.summary = summary
 	a.mu.Unlock()
+	a.clearPreviewCache()
 
 	response := MoveResponse{Results: results, Summary: summary, Succeeded: succeeded, Partial: partial, Failed: failed, Skipped: skipped}
 	a.emit("delete:done", response)

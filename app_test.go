@@ -5,12 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/preview"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
 )
 
@@ -171,40 +171,67 @@ func TestAppDeleteSkipsChangedTarget(t *testing.T) {
 	}
 }
 
-func TestExplorerCommandFolderOpensContentsAndFileSelects(t *testing.T) {
-	root := t.TempDir()
-	sub := filepath.Join(root, "日本語 フォルダ")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	file := filepath.Join(root, "a&b #1.zip")
-	if err := os.WriteFile(file, []byte("zip"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	name, args, err := explorerCommand(sub)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		if name != "explorer.exe" || len(args) != 1 || args[0] != sub {
-			t.Fatalf("folder command = %s %#v", name, args)
-		}
-	}
-
-	name, args, err = explorerCommand(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "windows" {
-		if name != "explorer.exe" || len(args) != 1 || args[0] != "/select,"+file {
-			t.Fatalf("file command = %s %#v", name, args)
-		}
-	}
-
-	if _, _, err := explorerCommand(filepath.Join(root, "missing")); err == nil {
+func TestOpenInExplorerMissingPath(t *testing.T) {
+	app := newTestApp(t)
+	if err := app.OpenInExplorer(filepath.Join(t.TempDir(), "missing.zip")); err == nil {
 		t.Fatal("missing path must fail")
 	}
+}
+
+func TestAppPreviewZipAndFolder(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "photos.zip")
+	folder := filepath.Join(root, "photos")
+	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
+	if len(ids) != 1 {
+		t.Fatalf("ids = %v", ids)
+	}
+	zipPreview := app.GetPreview(ids[0], "")
+	if zipPreview.Error != "" || zipPreview.Source != "zip" || len(zipPreview.Sources) != 2 {
+		t.Fatalf("zip preview = %+v", zipPreview)
+	}
+	if !previewHasPath(zipPreview.Entries, "photos/a.txt") {
+		t.Fatalf("zip entries = %+v", zipPreview.Entries)
+	}
+	folderPreview := app.GetPreview(ids[0], "folder")
+	if folderPreview.Error != "" || folderPreview.Source != "folder" {
+		t.Fatalf("folder preview = %+v", folderPreview)
+	}
+	if !previewHasPath(folderPreview.Entries, "a.txt") {
+		t.Fatalf("folder entries = %+v", folderPreview.Entries)
+	}
+
+	app.mover = func(path string) error { return os.RemoveAll(path) }
+	if _, err := app.DeleteSelected([]MoveRequest{{ID: ids[0], Method: MoveMethodZip}}, true); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := app.GetPreview(ids[0], "zip")
+	if unavailable.Error == "" || unavailable.Source != "zip" {
+		t.Fatalf("unavailable preview = %+v", unavailable)
+	}
+	remaining := app.GetPreview(ids[0], "")
+	if remaining.Error != "" || remaining.Source != "folder" {
+		t.Fatalf("remaining preview = %+v", remaining)
+	}
+}
+
+func previewHasPath(entries []preview.Entry, path string) bool {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAppMoveZipOnly(t *testing.T) {

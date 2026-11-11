@@ -758,6 +758,20 @@ body.col-resizing * {
   user-select: none;
 }
 
+body.drag-selecting {
+  cursor: ns-resize;
+  user-select: none;
+}
+
+body.drag-selecting .row,
+body.drag-selecting .row * {
+  user-select: none;
+}
+
+body.drag-selecting input[data-role="select"] {
+  cursor: ns-resize;
+}
+
 .row .cell.muted-cell {
   color: var(--muted);
 }

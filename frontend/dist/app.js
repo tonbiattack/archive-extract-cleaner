@@ -65,6 +65,10 @@
     previewScrollTop: 0,
     previewVisible: [],
     previewVisibleDirty: true,
+    dragSelect: null,
+    pendingDragSelection: null,
+    suppressRowClickUntil: 0,
+    suppressCheckboxChangeUntil: 0,
   };
 
   const el = (id) => document.getElementById(id);
@@ -632,6 +636,7 @@
         state.initialLoaded = true;
         applyMeta(page);
         renderRows();
+        applyPendingDragSelection();
       })
       .catch((error) => {
         if (generation === state.generation) {
@@ -660,6 +665,7 @@
   }
 
   function clearRows(resetScroll) {
+    cancelDragSelection();
     state.generation++;
     state.pages.clear();
     state.loading.clear();
@@ -712,6 +718,253 @@
     if (added === 0) toast("範囲内に選択可能な削除候補がありません");
   }
 
+  const DRAG_EDGE = 28;
+  const DRAG_MAX_SCROLL = 20;
+
+  function applyDragRow(row, mode) {
+    const selected = state.selected.has(row.id);
+    if (mode === "add") {
+      if (selected) return false;
+      addSelection(row);
+      return true;
+    }
+    if (!selected) return false;
+    removeSelection(row.id);
+    return true;
+  }
+
+  function dragIndexAtPoint(x, y) {
+    if (!state.total) return null;
+    const rect = tableScroll.getBoundingClientRect();
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+    if (typeof document.elementFromPoint === "function") {
+      try {
+        const hit = document.elementFromPoint(x, y);
+        const rowElement = hit && hit.closest ? hit.closest(".row") : null;
+        if (rowElement && rowsEl.contains(rowElement)) {
+          const index = Number(rowElement.dataset.index);
+          if (Number.isInteger(index) && index >= 0) return index;
+        }
+      } catch (_) {
+        // フォールバックして座標から行を求める
+      }
+    }
+    const headerHeight = tableHeader.getBoundingClientRect().height || 34;
+    const contentY = y - rect.top - headerHeight + tableScroll.scrollTop;
+    const index = Math.floor(contentY / ROW_H);
+    if (!Number.isFinite(index)) return null;
+    return Math.max(0, Math.min(state.total - 1, index));
+  }
+
+  function applyDragIndex(index) {
+    const drag = state.dragSelect;
+    if (!drag || index == null || state.total <= 0) return;
+    const target = Math.max(0, Math.min(state.total - 1, Number(index)));
+    if (!Number.isFinite(target)) return;
+    const from = Math.min(drag.lastIndex, target);
+    const to = Math.max(drag.lastIndex, target);
+    drag.lastIndex = target;
+    let changed = false;
+    let firstPending = Infinity;
+    let lastPending = -1;
+    for (let i = from; i <= to; i++) {
+      if (drag.visited.has(i)) continue;
+      const row = getRow(i);
+      if (!row) {
+        drag.pending.add(i);
+        firstPending = Math.min(firstPending, i);
+        lastPending = Math.max(lastPending, i);
+        continue;
+      }
+      drag.visited.add(i);
+      if (row.deletable && applyDragRow(row, drag.mode)) changed = true;
+    }
+    if (lastPending >= 0) {
+      ensurePages(Math.floor(firstPending / PAGE_SIZE), Math.floor(lastPending / PAGE_SIZE));
+    }
+    if (changed) {
+      updateSelectionUI();
+      scheduleRender();
+    }
+  }
+
+  function applyPendingDragSelection() {
+    const drag = state.dragSelect || state.pendingDragSelection;
+    if (!drag || !drag.pending || drag.pending.size === 0) {
+      if (!state.dragSelect) state.pendingDragSelection = null;
+      return;
+    }
+    let changed = false;
+    let remaining = false;
+    for (const index of Array.from(drag.pending)) {
+      const row = getRow(index);
+      if (!row) {
+        remaining = true;
+        continue;
+      }
+      drag.pending.delete(index);
+      if (drag.visited.has(index)) continue;
+      drag.visited.add(index);
+      if (row.deletable && applyDragRow(row, drag.mode)) changed = true;
+    }
+    if (remaining && state.total > 0) {
+      for (const index of Array.from(drag.pending)) {
+        if (index >= state.total) drag.pending.delete(index);
+      }
+    }
+    if (!state.dragSelect && drag.pending.size === 0) state.pendingDragSelection = null;
+    if (changed) {
+      updateSelectionUI();
+      scheduleRender();
+    }
+  }
+
+  function clearPendingDragSelection() {
+    state.pendingDragSelection = null;
+  }
+
+  function dragAutoScrollTick() {
+    const drag = state.dragSelect;
+    if (!drag) return;
+    drag.autoScrollFrame = 0;
+    const rect = tableScroll.getBoundingClientRect();
+    let speed = 0;
+    if (drag.clientX >= rect.left && drag.clientX <= rect.right) {
+      if (drag.clientY < rect.top + DRAG_EDGE) {
+        speed = -Math.ceil(((rect.top + DRAG_EDGE - drag.clientY) / DRAG_EDGE) * DRAG_MAX_SCROLL);
+      } else if (drag.clientY > rect.bottom - DRAG_EDGE) {
+        speed = Math.ceil(((drag.clientY - (rect.bottom - DRAG_EDGE)) / DRAG_EDGE) * DRAG_MAX_SCROLL);
+      }
+    }
+    speed = Math.max(-DRAG_MAX_SCROLL, Math.min(DRAG_MAX_SCROLL, speed));
+    if (speed !== 0) {
+      const before = tableScroll.scrollTop;
+      tableScroll.scrollTop += speed;
+      if (tableScroll.scrollTop !== before) {
+        const index = dragIndexAtPoint(drag.clientX, drag.clientY);
+        if (index != null) applyDragIndex(index);
+      }
+    }
+    drag.autoScrollFrame = requestAnimationFrame(dragAutoScrollTick);
+  }
+
+  function onDragMove(event) {
+    const drag = state.dragSelect;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    event.preventDefault();
+    drag.clientX = event.clientX;
+    drag.clientY = event.clientY;
+    const index = dragIndexAtPoint(drag.clientX, drag.clientY);
+    if (index != null) applyDragIndex(index);
+  }
+
+  function onDragEnd(event) {
+    const drag = state.dragSelect;
+    if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+    if (event && event.type !== "pointercancel") {
+      drag.clientX = event.clientX;
+      drag.clientY = event.clientY;
+      const index = dragIndexAtPoint(drag.clientX, drag.clientY);
+      if (index != null) applyDragIndex(index);
+    }
+    finishDragSelection(!event || event.type !== "pointercancel");
+  }
+
+  function finishDragSelection(suppressClick) {
+    const drag = state.dragSelect;
+    if (!drag) return;
+    if (drag.autoScrollFrame) cancelAnimationFrame(drag.autoScrollFrame);
+    state.dragSelect = null;
+    document.body.classList.remove("drag-selecting");
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragEnd);
+    if (typeof rowsEl.releasePointerCapture === "function" && drag.pointerId != null) {
+      try {
+        if (!rowsEl.hasPointerCapture || rowsEl.hasPointerCapture(drag.pointerId)) {
+          rowsEl.releasePointerCapture(drag.pointerId);
+        }
+      } catch (_) {
+        // ポインターキャプチャ未対応・解放済みは無視
+      }
+    }
+    if (suppressClick !== false) {
+      state.suppressRowClickUntil = performance.now() + 350;
+      state.suppressCheckboxChangeUntil = performance.now() + 350;
+    } else {
+      state.suppressRowClickUntil = 0;
+      state.suppressCheckboxChangeUntil = 0;
+    }
+    state.lastRowIndex = drag.lastIndex;
+    if (suppressClick !== false && drag.pending.size > 0) {
+      state.pendingDragSelection = {
+        mode: drag.mode,
+        visited: drag.visited,
+        pending: drag.pending,
+      };
+      let firstPending = Infinity;
+      let lastPending = -1;
+      drag.pending.forEach((index) => {
+        firstPending = Math.min(firstPending, index);
+        lastPending = Math.max(lastPending, index);
+      });
+      if (lastPending >= 0) {
+        ensurePages(Math.floor(firstPending / PAGE_SIZE), Math.floor(lastPending / PAGE_SIZE));
+      }
+    } else {
+      state.pendingDragSelection = null;
+      drag.pending.clear();
+    }
+    updateSelectionUI();
+    scheduleRender();
+  }
+
+  function cancelDragSelection() {
+    clearPendingDragSelection();
+    if (!state.dragSelect) return;
+    finishDragSelection(false);
+  }
+
+  function startDragSelection(event) {
+    if (state.dragSelect || state.busy) return;
+    if (event.button !== 0 || event.shiftKey) return;
+    if (event.pointerType === "touch") return;
+    const checkbox = event.target.closest ? event.target.closest('input[type="checkbox"][data-role="select"]') : null;
+    if (!checkbox) return;
+    const rowElement = checkbox.closest(".row");
+    if (!rowElement) return;
+    const index = Number(rowElement.dataset.index);
+    const row = getRow(index);
+    if (!row || !row.deletable) return;
+    event.preventDefault();
+    state.pendingDragSelection = null;
+    if (typeof rowsEl.setPointerCapture === "function" && event.pointerId != null) {
+      try {
+        rowsEl.setPointerCapture(event.pointerId);
+      } catch (_) {
+        // ポインターキャプチャ未対応時はwindowイベントで追跡する
+      }
+    }
+    state.dragSelect = {
+      pointerId: event.pointerId,
+      mode: checkbox.checked ? "remove" : "add",
+      startIndex: index,
+      lastIndex: index,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      autoScrollFrame: 0,
+      visited: new Set(),
+      pending: new Set(),
+    };
+    state.lastRowIndex = index;
+    document.body.classList.add("drag-selecting");
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragEnd);
+    window.addEventListener("pointercancel", onDragEnd);
+    applyDragIndex(index);
+    state.dragSelect.autoScrollFrame = requestAnimationFrame(dragAutoScrollTick);
+  }
+
   function updateSelectionUI() {
     let bytes = 0;
     state.selected.forEach((item) => {
@@ -725,6 +978,7 @@
 
   async function selectAllCandidates() {
     if (state.busy) return;
+    clearPendingDragSelection();
     selectAllBtn.disabled = true;
     try {
       const ids = await api("CandidateIDs", currentQuery(0, 0));
@@ -1368,6 +1622,7 @@
 
   async function beginDelete() {
     if (state.busy || state.selected.size === 0) return;
+    clearPendingDragSelection();
     const ids = Array.from(state.selected.keys());
     state.busy = true;
     updateBusyUI();
@@ -1647,6 +1902,7 @@
       if (response && response.summary) state.summary = response.summary;
       renderSummary();
       state.selected.clear();
+      clearPendingDragSelection();
       state.activeId = null;
       state.detailToken++;
       state.previewToken++;
@@ -2164,11 +2420,27 @@
 
     tableScroll.addEventListener("scroll", () => {
       hideContextMenu();
+      if (state.dragSelect) {
+        const drag = state.dragSelect;
+        const index = dragIndexAtPoint(drag.clientX, drag.clientY);
+        if (index != null) applyDragIndex(index);
+      }
       scheduleRender();
     });
     window.addEventListener("resize", scheduleRender);
+    window.addEventListener("blur", cancelDragSelection);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) cancelDragSelection();
+    });
+
+    rowsEl.addEventListener("pointerdown", startDragSelection);
 
     rowsEl.addEventListener("click", (event) => {
+      if (state.dragSelect || performance.now() < state.suppressRowClickUntil) {
+        state.suppressRowClickUntil = 0;
+        if (event.target.matches && event.target.matches('input[type="checkbox"]')) event.preventDefault();
+        return;
+      }
       const rowElement = event.target.closest(".row");
       if (!rowElement) return;
       const index = Number(rowElement.dataset.index);
@@ -2188,9 +2460,14 @@
     rowsEl.addEventListener("change", (event) => {
       if (!event.target.matches('input[type="checkbox"]')) return;
       const id = event.target.dataset.id;
+      if (!id) return;
+      if (state.dragSelect || performance.now() < state.suppressCheckboxChangeUntil) {
+        state.suppressCheckboxChangeUntil = 0;
+        event.target.checked = state.selected.has(id);
+        return;
+      }
       const rowElement = event.target.closest(".row");
       const index = rowElement ? Number(rowElement.dataset.index) : null;
-      if (!id) return;
       if (event.target.checked) {
         const row = index == null ? null : getRow(index);
         if (row) addSelection(row);
@@ -2203,6 +2480,7 @@
     });
 
     rowsEl.addEventListener("dblclick", (event) => {
+      if (state.dragSelect || performance.now() < state.suppressRowClickUntil) return;
       if (event.target.matches('input[type="checkbox"]')) return;
       const rowElement = event.target.closest(".row");
       if (!rowElement) return;
@@ -2304,6 +2582,7 @@
     selectAllBtn.addEventListener("click", selectAllCandidates);
     clearSelectionBtn.addEventListener("click", () => {
       state.selected.clear();
+      clearPendingDragSelection();
       state.lastRowIndex = null;
       updateSelectionUI();
       renderRows();

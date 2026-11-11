@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +17,7 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/removal"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/shell"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/transfer"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
@@ -46,6 +45,8 @@ type App struct {
 	mover                removal.Mover
 	multiDriveCopyScript string
 	multiDriveCopyPreset string
+	previewMu            sync.Mutex
+	previewCache         map[string]cachedPreview
 }
 
 type ScanInfo struct {
@@ -98,6 +99,7 @@ func NewApp() *App {
 		mover:                removal.MoveToRecycleBin,
 		multiDriveCopyScript: scriptPath,
 		multiDriveCopyPreset: cfg.MultiDriveCopy.Preset,
+		previewCache:         map[string]cachedPreview{},
 	}
 	if configErr != nil {
 		app.configWarning = "設定ファイルを読み込めないため既定値を使用します: " + configErr.Error()
@@ -264,6 +266,7 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 	a.warnings = result.Warnings
 	a.warningTotal = result.WarningTotal
 	a.mu.Unlock()
+	a.clearPreviewCache()
 
 	info := ScanInfo{
 		Summary:      result.Summary,
@@ -365,42 +368,21 @@ func (a *App) PickFolder() (string, error) {
 }
 
 func (a *App) OpenInExplorer(path string) error {
-	name, args, err := explorerCommand(path)
-	if err != nil {
-		return err
-	}
-	return exec.Command(name, args...).Start()
-}
-
-func explorerCommand(path string) (string, []string, error) {
 	if path == "" {
-		return "", nil, errors.New("パスが空です")
+		return errors.New("パスが空です")
 	}
 	abs, err := winpath.CleanAbs(path)
 	if err != nil {
-		return "", nil, err
+		return err
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {
-		return "", nil, err
+		return err
 	}
-	switch runtime.GOOS {
-	case "windows":
-		if info.IsDir() {
-			return "explorer.exe", []string{abs}, nil
-		}
-		return "explorer.exe", []string{"/select," + abs}, nil
-	case "darwin":
-		if info.IsDir() {
-			return "open", []string{abs}, nil
-		}
-		return "open", []string{"-R", abs}, nil
-	default:
-		if info.IsDir() {
-			return "xdg-open", []string{abs}, nil
-		}
-		return "xdg-open", []string{filepath.Dir(abs)}, nil
+	if info.IsDir() {
+		return shell.OpenFolder(abs)
 	}
+	return shell.RevealFile(abs)
 }
 
 func (a *App) RevealItem(id string) error {

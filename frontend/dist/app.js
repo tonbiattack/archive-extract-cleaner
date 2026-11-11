@@ -57,6 +57,14 @@
     moveMethods: new Map(),
     moveRequests: [],
     movePreview: null,
+    detailToken: 0,
+    previewToken: 0,
+    preview: null,
+    previewSearch: "",
+    previewExpanded: new Set(),
+    previewScrollTop: 0,
+    previewVisible: [],
+    previewVisibleDirty: true,
   };
 
   const el = (id) => document.getElementById(id);
@@ -152,6 +160,11 @@
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return "—";
     return date.toLocaleString("ja-JP");
+  }
+
+  function fmtPreviewDate(value) {
+    const text = fmtDate(value);
+    return text === "—" ? text : text.replace(/:\d{2}$/, "");
   }
 
   function loadColumnWidths() {
@@ -350,6 +363,14 @@
     folder: "解凍済みフォルダのみ",
     zip: "ZIPのみ",
     both: "ZIPとフォルダの両方",
+  };
+
+  const PREVIEW_KIND_LABEL = {
+    file: "ファイル",
+    directory: "フォルダ",
+    link: "リンク",
+    error: "エラー",
+    other: "その他",
   };
 
   function verdictBadge(item) {
@@ -863,11 +884,25 @@
 
   async function showDetail(id) {
     state.activeId = id;
+    const detailToken = ++state.detailToken;
+    const previewToken = ++state.previewToken;
+    state.preview = { id, source: "", sources: [], entries: [], truncated: false, loading: true, error: "" };
+    state.previewSearch = "";
+    state.previewExpanded = new Set();
+    state.previewScrollTop = 0;
+    state.previewVisible = [];
+    state.previewVisibleDirty = true;
+    state.detailItem = null;
+    detailPane.innerHTML =
+      '<div class="detail-empty"><div class="detail-title">詳細</div><p>読み込み中...</p></div>';
     renderRows();
+    loadPreview(id, "", previewToken);
     try {
       const item = await api("GetItemDetail", id);
+      if (detailToken !== state.detailToken) return;
       renderDetail(item);
     } catch (error) {
+      if (detailToken !== state.detailToken) return;
       toast("詳細の取得に失敗しました: " + error.message, true);
     }
   }
@@ -944,8 +979,9 @@
       (zipDisabled ? " disabled" : "") +
       '>ZIPの場所を表示</button>' +
       copyButtons +
-      "</div>" +
-      '<dl class="detail-grid">' +
+      "</div></div>" +
+      '<div id="previewSection" class="preview-section"></div>' +
+      '<div class="detail-block"><dl class="detail-grid">' +
       rows
         .map(
           ([label, value]) =>
@@ -963,6 +999,218 @@
     html +=
       '<div class="detail-note">ZIPと解凍済みフォルダのいずれか、または両方をWindowsのごみ箱へ移動できます。完全削除へのフォールバックは行いません。ZIPとフォルダの両方の移動は、最後のローカルコピーを失う可能性があります。</div>';
     detailPane.innerHTML = html;
+    renderPreviewSection();
+  }
+
+  async function loadPreview(id, source, token) {
+    const previous = state.preview || { id, sources: [] };
+    state.preview = {
+      id,
+      source: source || previous.source || "",
+      sources: previous.sources || [],
+      entries: [],
+      truncated: false,
+      loading: true,
+      error: "",
+    };
+    renderPreviewSection();
+    try {
+      const response = await api("GetPreview", id, source || "");
+      if (token !== state.previewToken || state.activeId !== id) return;
+      state.preview = {
+        id,
+        source: (response && response.source) || "",
+        sources: (response && response.sources) || [],
+        entries: (response && response.entries) || [],
+        truncated: !!(response && response.truncated),
+        loading: false,
+        error: (response && response.error) || "",
+      };
+      state.previewSearch = "";
+      state.previewExpanded = autoExpandPreview(state.preview.entries);
+      state.previewScrollTop = 0;
+      state.previewVisibleDirty = true;
+      renderPreviewSection();
+    } catch (error) {
+      if (token !== state.previewToken || state.activeId !== id) return;
+      state.preview = {
+        ...state.preview,
+        entries: [],
+        loading: false,
+        error: "プレビューを読み込めません: " + error.message,
+      };
+      renderPreviewSection();
+    }
+  }
+
+  function autoExpandPreview(entries) {
+    const top = (entries || []).filter((entry) => entry.depth === 0);
+    if (top.length === 1 && top[0].kind === "directory") {
+      return new Set([top[0].path]);
+    }
+    return new Set();
+  }
+
+  function previewSourceName(kind) {
+    return kind === "zip" ? "ZIP" : "フォルダ";
+  }
+
+  function renderPreviewSection() {
+    const section = document.getElementById("previewSection");
+    if (!section) return;
+    const preview = state.preview;
+    let html = '<div class="preview-head"><div class="detail-title">中身プレビュー</div><div class="preview-tabs">';
+    if (preview && preview.sources.length) {
+      html += preview.sources
+        .map(
+          (source) =>
+            '<button type="button" class="preview-tab' +
+            (preview.source === source.kind ? " active" : "") +
+            '" data-preview-source="' +
+            esc(source.kind) +
+            '"' +
+            (source.available ? "" : " disabled") +
+            ' title="' +
+            esc(source.path) +
+            '">' +
+            esc(previewSourceName(source.kind)) +
+            (source.available ? "" : "（利用不可）") +
+            "</button>"
+        )
+        .join("");
+    }
+    html += "</div></div>";
+
+    if (!preview) {
+      section.innerHTML = html + '<p class="preview-empty">行を選択すると中身を表示します。</p>';
+      return;
+    }
+    if (preview.error) {
+      section.innerHTML = html + '<p class="preview-error">' + esc(preview.error) + "</p>";
+      return;
+    }
+    if (preview.loading) {
+      section.innerHTML = html + '<p class="preview-loading">読み込み中...</p>';
+      return;
+    }
+    if (!preview.entries.length) {
+      section.innerHTML = html + '<p class="preview-empty">項目がありません。</p>';
+      return;
+    }
+    const note =
+      preview.source === "zip"
+        ? "ZIP内の相対パスです（実ファイルのフルパスではありません）。読み取りのみで解凍しません。"
+        : "解凍済みフォルダを読み取り専用で表示しています。";
+    html +=
+      '<div class="preview-toolbar"><input id="previewSearch" class="preview-search" type="search" placeholder="名前・パス・拡張子で絞り込み" value="' +
+      esc(state.previewSearch) +
+      '" autocomplete="off"><span id="previewCount" class="preview-count"></span></div>' +
+      '<p class="preview-source-note">' +
+      esc(note) +
+      "</p>" +
+      '<div id="previewList" class="preview-list"><div id="previewVirtual" class="preview-virtual"></div></div>';
+    section.innerHTML = html;
+    const list = document.getElementById("previewList");
+    if (list) list.scrollTop = state.previewScrollTop;
+    renderPreviewList();
+  }
+
+  const PREVIEW_ROW_HEIGHT = 26;
+
+  function renderPreviewList() {
+    const preview = state.preview;
+    const list = document.getElementById("previewList");
+    const virtual = document.getElementById("previewVirtual");
+    if (!preview || !list || !virtual) return;
+    const query = (state.previewSearch || "").trim().toLowerCase();
+    const entries = preview.entries || [];
+    let visible;
+    if (state.previewVisibleDirty) {
+      if (query) {
+        visible = entries.filter(
+          (entry) =>
+            String(entry.path || "").toLowerCase().includes(query) ||
+            String(entry.name || "").toLowerCase().includes(query)
+        );
+      } else {
+        visible = entries.filter((entry) => {
+          if (!entry.depth) return true;
+          let parent = entry.path;
+          for (;;) {
+            const index = parent.lastIndexOf("/");
+            if (index < 0) break;
+            parent = parent.slice(0, index);
+            if (!state.previewExpanded.has(parent)) return false;
+          }
+          return true;
+        });
+      }
+      state.previewVisible = visible;
+      state.previewVisibleDirty = false;
+    } else {
+      visible = state.previewVisible;
+    }
+    const count = document.getElementById("previewCount");
+    if (count) {
+      count.textContent =
+        (query ? visible.length + " 件一致 / " : visible.length + " / ") +
+        entries.length +
+        " 件" +
+        (preview.truncated ? "（先頭 " + entries.length + " 件まで）" : "");
+    }
+    if (!visible.length) {
+      virtual.style.height = "0px";
+      virtual.innerHTML = '<p class="preview-empty">' + (query ? "一致する項目はありません。" : "項目がありません。") + "</p>";
+      return;
+    }
+    const total = visible.length;
+    const viewport = list.clientHeight || 260;
+    const start = Math.max(0, Math.floor(state.previewScrollTop / PREVIEW_ROW_HEIGHT) - 6);
+    const end = Math.min(total, Math.ceil((state.previewScrollTop + viewport) / PREVIEW_ROW_HEIGHT) + 6);
+    const rows = [];
+    for (let index = start; index < end; index++) {
+      const entry = visible[index];
+      const isDir = entry.kind === "directory";
+      const expanded = state.previewExpanded.has(entry.path);
+      const indent = query ? 0 : Math.max(0, Number(entry.depth) || 0) * 14;
+      const toggle = isDir
+        ? '<button type="button" class="preview-toggle" data-preview-toggle="' +
+          esc(entry.path) +
+          '" aria-label="' +
+          (expanded ? "折りたたむ" : "展開") +
+          '">' +
+          (expanded ? "▾" : "▸") +
+          "</button>"
+        : '<span class="preview-toggle preview-toggle-placeholder"></span>';
+      rows.push(
+        '<div class="preview-row' +
+          (isDir ? " is-dir" : "") +
+          '" style="padding-left:' +
+          indent +
+          'px" title="' +
+          esc(entry.path) +
+          '">' +
+          toggle +
+          '<span class="preview-kind">' +
+          esc(PREVIEW_KIND_LABEL[entry.kind] || entry.kind) +
+          "</span>" +
+          '<span class="preview-name">' +
+          esc(query ? entry.path : entry.name) +
+          "</span>" +
+          '<span class="preview-size">' +
+          esc(isDir ? "—" : fmtBytes(entry.size)) +
+          "</span>" +
+          '<span class="preview-date">' +
+          esc(fmtPreviewDate(entry.modified)) +
+          "</span>" +
+          '<button type="button" class="preview-copy" data-preview-copy="' +
+          esc(entry.path) +
+          '" title="相対パスをコピー">⧉</button></div>'
+      );
+    }
+    virtual.style.height = total * PREVIEW_ROW_HEIGHT + "px";
+    virtual.innerHTML =
+      '<div class="preview-rows" style="transform: translateY(' + start * PREVIEW_ROW_HEIGHT + "px)\">" + rows.join("") + "</div>";
   }
 
   // ---------- progress ----------
@@ -1034,6 +1282,14 @@
     state.scanning = true;
     state.selected.clear();
     state.activeId = null;
+    state.detailToken++;
+    state.previewToken++;
+    state.preview = null;
+    state.previewSearch = "";
+    state.previewExpanded = new Set();
+    state.previewScrollTop = 0;
+    state.previewVisible = [];
+    state.previewVisibleDirty = true;
     state.summary = null;
     state.transferLaunched = false;
     state.warnings = [];
@@ -1392,6 +1648,17 @@
       renderSummary();
       state.selected.clear();
       state.activeId = null;
+      state.detailToken++;
+      state.previewToken++;
+      state.preview = null;
+      state.previewSearch = "";
+      state.previewExpanded = new Set();
+      state.previewScrollTop = 0;
+      state.previewVisible = [];
+      state.previewVisibleDirty = true;
+      state.detailItem = null;
+      detailPane.innerHTML =
+        '<div class="detail-empty"><div class="detail-title">詳細</div><p>行を選択すると、ZIPとフォルダの対応・一致根拠・差異を表示します。</p></div>';
       updateSelectionUI();
       await reloadRows(false);
       const succeeded = response ? response.succeeded || 0 : 0;
@@ -1969,6 +2236,30 @@
     });
 
     detailPane.addEventListener("click", (event) => {
+      const previewCopy = event.target.closest("[data-preview-copy]");
+      if (previewCopy) {
+        copyText(previewCopy.dataset.previewCopy);
+        return;
+      }
+      const previewToggle = event.target.closest("[data-preview-toggle]");
+      if (previewToggle) {
+        const path = previewToggle.dataset.previewToggle;
+        if (state.previewExpanded.has(path)) state.previewExpanded.delete(path);
+        else state.previewExpanded.add(path);
+        state.previewVisibleDirty = true;
+        renderPreviewList();
+        return;
+      }
+      const previewTab = event.target.closest("[data-preview-source]");
+      if (previewTab && state.activeId && state.preview) {
+        const source = previewTab.dataset.previewSource;
+        if (source && source !== state.preview.source) {
+          const token = ++state.previewToken;
+          state.previewScrollTop = 0;
+          loadPreview(state.activeId, source, token);
+        }
+        return;
+      }
       const copyButton = event.target.closest('[data-action="copy"]');
       if (copyButton) {
         const item = state.detailItem;
@@ -1989,6 +2280,26 @@
       if (!button) return;
       api("RevealItem", button.dataset.id).catch((error) => toast(error.message, true));
     });
+
+    detailPane.addEventListener("input", (event) => {
+      if (event.target.id !== "previewSearch") return;
+      state.previewSearch = event.target.value;
+      state.previewScrollTop = 0;
+      state.previewVisibleDirty = true;
+      const list = document.getElementById("previewList");
+      if (list) list.scrollTop = 0;
+      renderPreviewList();
+    });
+
+    detailPane.addEventListener(
+      "scroll",
+      (event) => {
+        if (!event.target || event.target.id !== "previewList") return;
+        state.previewScrollTop = event.target.scrollTop;
+        renderPreviewList();
+      },
+      true
+    );
 
     selectAllBtn.addEventListener("click", selectAllCandidates);
     clearSelectionBtn.addEventListener("click", () => {

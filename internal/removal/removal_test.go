@@ -11,6 +11,68 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
 )
 
+func TestMoveFileToRecycleBin(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "photos.zip")
+	if err := os.WriteFile(file, []byte("zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	result := Move(context.Background(), file, []string{root}, KindFile, func(path string) error {
+		called = true
+		return os.RemoveAll(path)
+	})
+	if !result.Success || !called {
+		t.Fatalf("result = %+v, called = %v", result, called)
+	}
+	if _, err := os.Lstat(file); !os.IsNotExist(err) {
+		t.Fatalf("file still exists: %v", err)
+	}
+}
+
+func TestMoveFileRefusesOutsideAndKindMismatch(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.zip")
+	if err := os.WriteFile(outside, []byte("zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	mover := func(string) error {
+		called = true
+		return nil
+	}
+	if result := Move(context.Background(), outside, []string{root}, KindFile, mover); result.Success {
+		t.Fatal("outside file must be refused")
+	}
+	folder := filepath.Join(root, "folder")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if result := Move(context.Background(), folder, []string{root}, KindFile, mover); result.Success {
+		t.Fatal("folder must not be moved as a file")
+	}
+	if called {
+		t.Fatal("mover must not be called for refused targets")
+	}
+}
+
+func TestMoveFileDoesNotFallBackWhenMoverFails(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "photos.zip")
+	if err := os.WriteFile(file, []byte("zip"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := Move(context.Background(), file, []string{root}, KindFile, func(string) error {
+		return errors.New("recycle bin unavailable")
+	})
+	if result.Success {
+		t.Fatal("recycle failure must not be reported as success")
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("file was permanently deleted: %v", err)
+	}
+}
+
 func TestDeleteFolderToRecycleBin(t *testing.T) {
 	root := t.TempDir()
 	folder := filepath.Join(root, "photos")

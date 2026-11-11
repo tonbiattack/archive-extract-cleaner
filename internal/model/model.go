@@ -65,10 +65,15 @@ type Item struct {
 	CheckedAt      time.Time `json:"checkedAt"`
 	DeletedAt      time.Time `json:"deletedAt,omitempty"`
 	DeleteError    string    `json:"deleteError,omitempty"`
+	ZipMoved       bool      `json:"zipMoved"`
+	FolderMoved    bool      `json:"folderMoved"`
 }
 
 func (i Item) Deletable() bool {
-	return i.Verdict == VerdictDeleteCandidate && i.Status != StatusDeleted && i.ZipPath != "" && i.FolderPath != ""
+	if i.Verdict != VerdictDeleteCandidate || i.Status == StatusDeleted {
+		return false
+	}
+	return (i.ZipPath != "" && !i.ZipMoved) || (i.FolderPath != "" && !i.FolderMoved)
 }
 
 func (i Item) DisplayName() string {

@@ -39,6 +39,40 @@ func TestCheckRecycleDriveRejectsUNC(t *testing.T) {
 	}
 }
 
+func TestMoveFileToRecycleBinIntegration(t *testing.T) {
+	if os.Getenv("ARCHIVE_CLEANER_RECYCLE_TEST") != "1" {
+		t.Skip("set ARCHIVE_CLEANER_RECYCLE_TEST=1 to exercise the real Windows recycle bin")
+	}
+	root, err := os.MkdirTemp("", "archive-cleaner-recycle-file-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	file := filepath.Join(root, "archive-"+time.Now().Format("150405.000")+".zip")
+	if err := os.WriteFile(file, []byte("zip-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	volume := filepath.VolumeName(file) + `\`
+	before, err := queryRecycleBinItems(volume)
+	if err != nil {
+		t.Skipf("cannot query recycle bin: %v", err)
+	}
+	if err := MoveToRecycleBin(file); err != nil {
+		t.Fatalf("MoveToRecycleBin(file): %v", err)
+	}
+	if _, err := os.Lstat(file); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after recycle: %v", err)
+	}
+	after, err := queryRecycleBinItems(volume)
+	if err != nil {
+		t.Fatalf("cannot query recycle bin after file move: %v", err)
+	}
+	if after <= before {
+		t.Fatalf("recycle bin item count did not increase for file: %d -> %d", before, after)
+	}
+	t.Logf("moved file to recycle bin (items %d -> %d)", before, after)
+}
+
 func TestMoveToRecycleBinIntegration(t *testing.T) {
 	if os.Getenv("ARCHIVE_CLEANER_RECYCLE_TEST") != "1" {
 		t.Skip("set ARCHIVE_CLEANER_RECYCLE_TEST=1 to exercise the real Windows recycle bin")

@@ -53,6 +53,10 @@
     transferReviewSelected: new Set(),
     transferPaths: [],
     transferLaunched: false,
+    moveOptions: [],
+    moveMethods: new Map(),
+    moveRequests: [],
+    movePreview: null,
   };
 
   const el = (id) => document.getElementById(id);
@@ -342,13 +346,28 @@
     "strip-top": "トップ階層を除去して比較",
   };
 
+  const MOVE_METHOD_LABEL = {
+    folder: "解凍済みフォルダのみ",
+    zip: "ZIPのみ",
+    both: "ZIPとフォルダの両方",
+  };
+
   function verdictBadge(item) {
     const verdict = item.verdict || item.Verdict || "";
     let html = '<span class="badge v-' + esc(verdict) + '">' + esc(VERDICT_LABEL[verdict] || verdict) + "</span>";
     const status = item.status || item.Status || "";
-    if (status === "deleted") {
+    const zipMoved = !!item.zipMoved;
+    const folderMoved = !!item.folderMoved;
+    if (zipMoved && folderMoved) {
       html += '<span class="badge badge-deleted">ごみ箱へ移動済み</span>';
-    } else if (status === "error") {
+    } else if (zipMoved) {
+      html += '<span class="badge badge-deleted">ZIP移動済み</span>';
+    } else if (folderMoved) {
+      html += '<span class="badge badge-deleted">フォルダ移動済み</span>';
+    } else if (status === "deleted") {
+      html += '<span class="badge badge-deleted">ごみ箱へ移動済み</span>';
+    }
+    if (status === "error") {
       html += '<span class="badge v-UNVERIFIED">エラー</span>';
     }
     return html;
@@ -692,17 +711,20 @@
         toast("現在の条件で選択できる削除候補がありません");
         return;
       }
-      const preview = await api("PreviewDelete", ids);
+      const options = await api("GetMoveOptions", ids);
       state.selected.clear();
-      (preview.items || []).forEach((item) => {
-        state.selected.set(item.id, {
-          id: item.id,
-          name: item.name,
-          size: item.size,
-          zipPath: item.zipPath,
-          folderPath: item.folderPath,
+      (options || [])
+        .filter((option) => option.defaultMethod)
+        .forEach((option) => {
+          const size = option.defaultMethod === "zip" ? option.zipSize : option.folderSize;
+          state.selected.set(option.id, {
+            id: option.id,
+            name: option.name,
+            size,
+            zipPath: option.zipPath,
+            folderPath: option.folderPath,
+          });
         });
-      });
       state.lastRowIndex = null;
       updateSelectionUI();
       renderRows();
@@ -856,6 +878,12 @@
     rows.push(["判定", verdictBadge(item)]);
     if (item.status === "error") {
       rows.push(["状態", '<span class="result-fail">エラー</span>']);
+    } else if (item.zipMoved && item.folderMoved) {
+      rows.push(["状態", '<span class="result-ok">ZIPとフォルダをごみ箱へ移動済み</span>']);
+    } else if (item.zipMoved) {
+      rows.push(["状態", '<span class="result-ok">ZIPをごみ箱へ移動済み（フォルダは保持）</span>']);
+    } else if (item.folderMoved) {
+      rows.push(["状態", '<span class="result-ok">フォルダをごみ箱へ移動済み（ZIPは保持）</span>']);
     } else if (item.status === "deleted") {
       rows.push(["状態", '<span class="result-ok">ごみ箱へ移動済み</span>']);
     }
@@ -895,6 +923,8 @@
           "</button>"
       )
       .join("");
+    const folderDisabled = !item.folderPath || item.folderMoved;
+    const zipDisabled = !item.zipPath || item.zipMoved;
 
     let html =
       '<div class="detail-block"><h3 class="detail-name">' +
@@ -903,9 +933,16 @@
       esc(item.reason || "") +
       "</p>" +
       '<div class="detail-actions">' +
-      '<button class="btn small" data-action="reveal" data-id="' +
+      '<button class="btn small" data-action="reveal-folder" data-id="' +
       esc(item.id) +
-      '">エクスプローラーで表示</button>' +
+      '"' +
+      (folderDisabled ? " disabled" : "") +
+      '>解凍済みフォルダを開く</button>' +
+      '<button class="btn small" data-action="reveal-zip" data-id="' +
+      esc(item.id) +
+      '"' +
+      (zipDisabled ? " disabled" : "") +
+      '>ZIPの場所を表示</button>' +
       copyButtons +
       "</div>" +
       '<dl class="detail-grid">' +
@@ -924,7 +961,7 @@
         "</ul></div>";
     }
     html +=
-      '<div class="detail-note">MVPでは解凍済みフォルダのみWindowsのごみ箱へ移動できます。ZIP本体は移動されません。失敗時に完全削除へフォールバックしません。</div>';
+      '<div class="detail-note">ZIPと解凍済みフォルダのいずれか、または両方をWindowsのごみ箱へ移動できます。完全削除へのフォールバックは行いません。ZIPとフォルダの両方の移動は、最後のローカルコピーを失う可能性があります。</div>';
     detailPane.innerHTML = html;
   }
 
@@ -1057,22 +1094,44 @@
 
   // ---------- delete ----------
 
+  function moveKindLabel(kind) {
+    return kind === "zip" ? "ZIP" : "フォルダ";
+  }
+
+  function methodLabel(method) {
+    return MOVE_METHOD_LABEL[method] || method;
+  }
+
+  function targetsForOption(option, method) {
+    const targets = option.targets || [];
+    if (method === "folder") return targets.filter((target) => target.kind === "folder");
+    if (method === "zip") return targets.filter((target) => target.kind === "zip");
+    if (method === "both") return targets.filter((target) => target.kind === "folder" || target.kind === "zip");
+    return [];
+  }
+
   async function beginDelete() {
     if (state.busy || state.selected.size === 0) return;
     const ids = Array.from(state.selected.keys());
     state.busy = true;
     updateBusyUI();
-    setStatus("ごみ箱に移動する対象を確認しています...");
+    setStatus("移動方法を確認しています...");
     try {
-      const preview = await api("PreviewDelete", ids);
-      if (!preview || preview.count === 0) {
-        toast("現在選択されている項目に移動可能な候補がありません", true);
-        setStatus("選択項目に移動可能な候補がありません");
+      const options = await api("GetMoveOptions", ids);
+      if (!Array.isArray(options) || options.length === 0) {
+        toast("移動できる項目がありません。再スキャンしてください。", true);
         return;
       }
-      showDeleteConfirm(preview);
+      state.moveOptions = options;
+      state.moveMethods = new Map();
+      options.forEach((option) => {
+        if (option.defaultMethod) state.moveMethods.set(option.id, option.defaultMethod);
+      });
+      state.movePreview = null;
+      state.moveRequests = [];
+      showMoveMethodDialog();
     } catch (error) {
-      toast("移動対象の確認に失敗しました: " + error.message, true);
+      toast("移動方法の取得に失敗しました: " + error.message, true);
     } finally {
       state.busy = false;
       updateBusyUI();
@@ -1080,35 +1139,204 @@
     }
   }
 
-  function showDeleteConfirm(preview) {
-    const items = preview.items || [];
-    const visible = items.slice(0, 100);
-    const rest = items.length - visible.length;
-    const validIds = items.map((item) => item.id);
+  function showMoveMethodDialog() {
+    const options = state.moveOptions || [];
+    const cards = options
+      .map((option) => {
+        const method = state.moveMethods.get(option.id) || "";
+        const targets = option.targets || [];
+        const targetRows = targets
+          .map(
+            (target) =>
+              '<li><span class="move-kind">' +
+              esc(moveKindLabel(target.kind)) +
+              "</span> " +
+              esc(target.path) +
+              ' <span class="muted">' +
+              esc(fmtBytes(target.size)) +
+              "</span></li>"
+          )
+          .join("");
+        const radio = (value, label, disabled, className) =>
+          '<label class="move-choice ' +
+          (className || "") +
+          (disabled ? " disabled" : "") +
+          '"><input type="radio" name="move-method-' +
+          esc(option.id) +
+          '" data-move-method="' +
+          esc(option.id) +
+          '" value="' +
+          value +
+          '"' +
+          (method === value ? " checked" : "") +
+          (disabled ? " disabled" : "") +
+          ">" +
+          esc(label) +
+          "</label>";
+        return (
+          '<div class="move-card" data-move-card="' +
+          esc(option.id) +
+          '"><div class="move-card-head"><strong>' +
+          esc(option.name) +
+          "</strong>" +
+          verdictBadge(option) +
+          "</div>" +
+          (targetRows
+            ? '<ul class="move-targets">' + targetRows + "</ul>"
+            : '<p class="result-fail">移動できる既存パスがありません。</p>') +
+          '<div class="move-choices">' +
+          radio("folder", "解凍済みフォルダのみ", !option.canFolder, "") +
+          radio("zip", "ZIPのみ", !option.canZip, "") +
+          radio("both", "ZIPとフォルダの両方（危険）", !option.canBoth, "danger") +
+          "</div>" +
+          (option.warning ? '<p class="move-warning">' + esc(option.warning) + "</p>" : "") +
+          "</div>"
+        );
+      })
+      .join("");
     const body =
-      '<div class="stat-row">' +
-      '<div class="stat"><div class="stat-label">移動対象</div><div class="stat-value">' + preview.count + " 件</div></div>" +
-      '<div class="stat"><div class="stat-label">合計サイズ</div><div class="stat-value">' + esc(fmtBytes(preview.bytes)) + "</div></div>" +
+      '<p class="muted">移動する対象を項目ごとに選択してください。ZIPとフォルダの両方を移動すると、最後のローカルコピーを失う可能性があります。</p>' +
+      '<div class="move-list">' +
+      cards +
       "</div>" +
-      '<p class="modal-note">Windowsのごみ箱に移動します。元に戻せます。移動直前に各ZIPとフォルダを再照合し、内容に変化があればその対象はスキップされます。ZIP本体は移動されません。</p>' +
-      '<div class="detail-title" style="margin-top:14px">ごみ箱に移動する解凍済みフォルダ</div>' +
-      '<ul class="modal-list">' +
-      visible.map((item) => "<li>" + esc(item.folderPath) + "</li>").join("") +
-      (rest > 0 ? '<li class="muted">ほか ' + rest + " 件</li>" : "") +
-      "</ul>";
+      '<div id="moveBothWarning" class="modal-note hidden">ZIPとフォルダの両方を移動する項目があります。この操作は転送を行わず、最後のローカルコピーを失う可能性があります。次の最終確認でも明示的に承認してください。</div>' +
+      '<div id="moveSummary" class="transfer-selection-summary"></div>';
     openModal({
-      title: "ごみ箱への移動確認",
+      title: "ごみ箱へ移動する対象を選択",
       body,
       wide: true,
       actions: [
         { label: "キャンセル", className: "btn", onClick: closeModal },
-        {
-          label: "ごみ箱に移動",
-          className: "btn danger",
-          onClick: () => executeDelete(validIds),
-        },
+        { label: "最終確認へ", id: "moveConfirmBtn", className: "btn primary", onClick: confirmMoveMethods },
       ],
     });
+    updateMoveAggregate();
+  }
+
+  function buildMoveRequests() {
+    const requests = [];
+    let valid = true;
+    for (const option of state.moveOptions || []) {
+      const method = state.moveMethods.get(option.id) || "";
+      if (!method) {
+        valid = false;
+        continue;
+      }
+      const targets = targetsForOption(option, method);
+      if (targets.length === 0) {
+        valid = false;
+        continue;
+      }
+      requests.push({ id: option.id, method });
+    }
+    return { requests, valid: valid && requests.length > 0 };
+  }
+
+  function updateMoveAggregate() {
+    const { requests, valid } = buildMoveRequests();
+    let targetCount = 0;
+    let bytes = 0;
+    for (const request of requests) {
+      const option = state.moveOptions.find((item) => item.id === request.id);
+      if (!option) continue;
+      const targets = targetsForOption(option, request.method);
+      targetCount += targets.length;
+      targets.forEach((target) => {
+        bytes += Number(target.size) || 0;
+      });
+    }
+    const summary = document.getElementById("moveSummary");
+    if (summary) {
+      summary.textContent =
+        "移動対象: " + requests.length + " 項目 / " + targetCount + " 件 / " + fmtBytes(bytes);
+    }
+    const bothWarning = document.getElementById("moveBothWarning");
+    const hasBoth = requests.some((request) => request.method === "both");
+    if (bothWarning) bothWarning.classList.toggle("hidden", !hasBoth);
+    const confirm = document.getElementById("moveConfirmBtn");
+    if (confirm) confirm.disabled = !valid || targetCount === 0;
+    state.moveRequests = requests;
+  }
+
+  async function confirmMoveMethods() {
+    const { requests, valid } = buildMoveRequests();
+    if (!valid || requests.length === 0) {
+      toast("移動する対象と方法を選択してください", true);
+      return;
+    }
+    const confirm = document.getElementById("moveConfirmBtn");
+    if (confirm) confirm.disabled = true;
+    try {
+      const preview = await api("PreviewMove", requests);
+      state.movePreview = preview;
+      state.moveRequests = requests;
+      showMoveFinalDialog(preview, requests);
+    } catch (error) {
+      toast("最終確認の取得に失敗しました: " + error.message, true);
+      if (confirm) confirm.disabled = false;
+    }
+  }
+
+  function showMoveFinalDialog(preview, requests) {
+    const hasBoth = requests.some((request) => request.method === "both");
+    const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+    const items = (preview.items || [])
+      .map((item) => {
+        const targets = (item.targets || [])
+          .map(
+            (target) =>
+              '<li><span class="move-kind">' +
+              esc(moveKindLabel(target.kind)) +
+              "</span> " +
+              esc(target.path) +
+              ' <span class="muted">' +
+              esc(fmtBytes(target.size)) +
+              "</span></li>"
+          )
+          .join("");
+        return (
+          '<div class="move-final-item"><div class="move-final-head"><strong>' +
+          esc(item.name) +
+          "</strong><span>" +
+          esc(methodLabel(item.method)) +
+          "</span></div><ul class=\"move-targets\">" +
+          targets +
+          "</ul></div>"
+        );
+      })
+      .join("");
+    let body =
+      '<div class="stat-row">' +
+      '<div class="stat"><div class="stat-label">対象項目</div><div class="stat-value">' + (preview.itemCount || 0) + "</div></div>" +
+      '<div class="stat"><div class="stat-label">移動対象</div><div class="stat-value">' + (preview.targetCount || 0) + " 件</div></div>" +
+      '<div class="stat"><div class="stat-label">合計サイズ</div><div class="stat-value">' + esc(fmtBytes(preview.bytes || 0)) + "</div></div>" +
+      "</div>" +
+      '<p class="modal-note">Windowsのごみ箱へ移動します。復元できますが、完全削除へのフォールバックは行いません。移動直前に再検証し、変化した対象はスキップします。</p>' +
+      (warnings.length
+        ? '<ul class="modal-list move-warnings">' + warnings.map((warning) => "<li>" + esc(warning) + "</li>").join("") + "</ul>"
+        : "") +
+      '<div class="detail-title" style="margin-top:14px">移動対象のパス</div>' +
+      '<div class="move-final-list">' + items + "</div>";
+    if (hasBoth) {
+      body +=
+        '<label class="move-ack"><input type="checkbox" id="moveBothAck"> ZIPとフォルダの両方をごみ箱へ移動し、最後のローカルコピーを失う可能性があることを理解しました。</label>';
+    }
+    openModal({
+      title: "ごみ箱への移動の最終確認",
+      body,
+      wide: true,
+      actions: [
+        { label: "戻る", className: "btn", onClick: showMoveMethodDialog },
+        { label: "ごみ箱に移動", id: "moveExecuteBtn", className: "btn danger", onClick: () => executeMove(requests) },
+      ],
+    });
+    updateMoveFinalButton();
+  }
+
+  function updateMoveFinalButton() {
+    const ack = document.getElementById("moveBothAck");
+    const button = document.getElementById("moveExecuteBtn");
+    if (button) button.disabled = !!(ack && !ack.checked);
   }
 
   function deleteProgressBody(progress) {
@@ -1144,21 +1372,21 @@
     );
   }
 
-  async function executeDelete(ids) {
-    if (!ids || ids.length === 0) return;
+  async function executeMove(requests) {
+    if (!requests || requests.length === 0) return;
     state.busy = true;
     state.deleting = true;
-    state.deleteTotal = ids.length;
+    state.deleteTotal = requests.length;
     updateBusyUI();
     setStatus("ごみ箱に移動しています...");
     openModal({
       title: "ごみ箱に移動しています",
-      body: deleteProgressBody({ index: 0, total: ids.length, stage: "revalidating", name: "" }),
+      body: deleteProgressBody({ index: 0, total: requests.length, stage: "revalidating", name: "" }),
       actions: [],
       closable: false,
     });
     try {
-      const response = await api("DeleteSelected", ids, true);
+      const response = await api("DeleteSelected", requests, true);
       state.deleting = false;
       if (response && response.summary) state.summary = response.summary;
       renderSummary();
@@ -1166,20 +1394,35 @@
       state.activeId = null;
       updateSelectionUI();
       await reloadRows(false);
-      if (response && response.deleted > 0) {
-        toast(response.deleted + " 件の解凍済みフォルダをごみ箱に移動しました");
-        setStatus(
-          "移動完了: 成功 " +
-            response.deleted +
+      const succeeded = response ? response.succeeded || 0 : 0;
+      const partialCount = response ? response.partial || 0 : 0;
+      const failedCount = response ? response.failed || 0 : 0;
+      const skippedCount = response ? response.skipped || 0 : 0;
+      if (succeeded > 0 || partialCount > 0) {
+        toast(
+          "ごみ箱移動: 成功 " +
+            succeeded +
+            " / 一部成功 " +
+            partialCount +
             " / 失敗 " +
-            response.failed +
+            failedCount +
             " / スキップ " +
-            response.skipped
+            skippedCount
         );
       } else {
-        setStatus("ごみ箱に移動された項目はありません");
+        toast("ごみ箱に移動された項目はありません", true);
       }
-      showDeleteResult(response);
+      setStatus(
+        "移動完了: 成功 " +
+          succeeded +
+          " / 一部成功 " +
+          partialCount +
+          " / 失敗 " +
+          failedCount +
+          " / スキップ " +
+          skippedCount
+      );
+      showMoveResult(response);
     } catch (error) {
       state.deleting = false;
       closeModal();
@@ -1192,28 +1435,41 @@
     }
   }
 
-  function showDeleteResult(response) {
+  function showMoveResult(response) {
     if (!response) return;
     const results = response.results || [];
-    const failures = results.filter((item) => !item.success && !item.skipped);
+    const problems = results.filter((item) => !item.success && !item.skipped);
     const skipped = results.filter((item) => item.skipped);
     let body =
       '<div class="stat-row">' +
-      '<div class="stat"><div class="stat-label">移動成功</div><div class="stat-value result-ok">' +
-      (response.deleted || 0) +
-      "</div></div>" +
-      '<div class="stat"><div class="stat-label">失敗</div><div class="stat-value result-fail">' +
-      (response.failed || 0) +
-      "</div></div>" +
-      '<div class="stat"><div class="stat-label">スキップ</div><div class="stat-value">' +
-      (response.skipped || 0) +
-      "</div></div></div>";
-    if (failures.length) {
+      '<div class="stat"><div class="stat-label">成功</div><div class="stat-value result-ok">' + (response.succeeded || 0) + "</div></div>" +
+      '<div class="stat"><div class="stat-label">一部成功</div><div class="stat-value" style="color:var(--orange)">' + (response.partial || 0) + "</div></div>" +
+      '<div class="stat"><div class="stat-label">失敗</div><div class="stat-value result-fail">' + (response.failed || 0) + "</div></div>" +
+      '<div class="stat"><div class="stat-label">スキップ</div><div class="stat-value">' + (response.skipped || 0) + "</div></div>" +
+      "</div>";
+    if (problems.length) {
       body +=
-        '<div class="detail-title" style="margin-top:14px">失敗した項目</div><ul class="modal-list">' +
-        failures
+        '<div class="detail-title" style="margin-top:14px">失敗・一部成功の項目</div><ul class="modal-list">' +
+        problems
           .slice(0, 100)
-          .map((item) => "<li><strong>" + esc(item.name || item.folderPath) + "</strong><br>" + esc(item.reason) + "</li>")
+          .map((item) => {
+            const targets = (item.targets || [])
+              .map((target) => {
+                const mark = target.success ? "移動済み" : "失敗: " + target.reason;
+                return esc(moveKindLabel(target.kind)) + " " + esc(target.path) + " — " + esc(mark);
+              })
+              .join("<br>");
+            return (
+              "<li><strong>" +
+              esc(item.name) +
+              "</strong>（" +
+              esc(methodLabel(item.method)) +
+              "）<br>" +
+              esc(item.reason) +
+              (targets ? "<br>" + targets : "") +
+              "</li>"
+            );
+          })
           .join("") +
         "</ul>";
     }
@@ -1222,14 +1478,11 @@
         '<div class="detail-title" style="margin-top:14px">スキップした項目</div><ul class="modal-list">' +
         skipped
           .slice(0, 50)
-          .map((item) => "<li>" + esc(item.name || item.folderPath || item.id) + " — " + esc(item.reason) + "</li>")
+          .map((item) => "<li>" + esc(item.name || item.id) + " — " + esc(item.reason) + "</li>")
           .join("") +
         "</ul>";
     }
-    body +=
-      '<p class="muted" style="margin-top:10px">操作履歴: ' +
-      esc(state.logPath || "未設定") +
-      "</p>";
+    body += '<p class="muted" style="margin-top:10px">操作履歴: ' + esc(state.logPath || "未設定") + "</p>";
     openModal({
       title: "ごみ箱移動結果",
       body,
@@ -1722,6 +1975,16 @@
         if (item) copyText(item[copyButton.dataset.field]);
         return;
       }
+      const folderButton = event.target.closest('[data-action="reveal-folder"]');
+      if (folderButton) {
+        api("RevealFolder", folderButton.dataset.id).catch((error) => toast(error.message, true));
+        return;
+      }
+      const zipButton = event.target.closest('[data-action="reveal-zip"]');
+      if (zipButton) {
+        api("RevealZip", zipButton.dataset.id).catch((error) => toast(error.message, true));
+        return;
+      }
       const button = event.target.closest('[data-action="reveal"]');
       if (!button) return;
       api("RevealItem", button.dataset.id).catch((error) => toast(error.message, true));
@@ -1740,6 +2003,17 @@
     warningBadge.addEventListener("click", showWarnings);
     modalClose.addEventListener("click", closeModal);
     modalBody.addEventListener("change", (event) => {
+      if (event.target.matches("[data-move-method]")) {
+        const id = event.target.dataset.moveMethod;
+        if (!id) return;
+        state.moveMethods.set(id, event.target.value);
+        updateMoveAggregate();
+        return;
+      }
+      if (event.target.id === "moveBothAck") {
+        updateMoveFinalButton();
+        return;
+      }
       if (event.target.id === "transferRecommended") {
         state.transferRecommendedChecked = !!event.target.checked;
         updateTransferSelection();

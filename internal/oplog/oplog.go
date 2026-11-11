@@ -9,14 +9,17 @@ import (
 )
 
 type Entry struct {
-	Time       time.Time `json:"time"`
-	Action     string    `json:"action"`
-	ID         string    `json:"id"`
-	ZipPath    string    `json:"zipPath,omitempty"`
-	FolderPath string    `json:"folderPath,omitempty"`
-	Verdict    string    `json:"verdict,omitempty"`
-	Success    bool      `json:"success"`
-	Error      string    `json:"error,omitempty"`
+	Time          time.Time `json:"time"`
+	Action        string    `json:"action"`
+	Method        string    `json:"method,omitempty"`
+	ID            string    `json:"id"`
+	ZipPath       string    `json:"zipPath,omitempty"`
+	FolderPath    string    `json:"folderPath,omitempty"`
+	Verdict       string    `json:"verdict,omitempty"`
+	Success       bool      `json:"success"`
+	Error         string    `json:"error,omitempty"`
+	MovedTargets  []string  `json:"movedTargets,omitempty"`
+	FailedTargets []string  `json:"failedTargets,omitempty"`
 }
 
 type Logger struct {

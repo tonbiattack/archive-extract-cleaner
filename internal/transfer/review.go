@@ -87,7 +87,9 @@ func BuildReview(items []model.Item, scriptPath, preset string, busy bool) Revie
 
 func addItem(builder *reviewBuilder, item model.Item) {
 	if item.Status == model.StatusDeleted {
-		addCandidate(builder, item, item.ZipPath, "zip", false)
+		if !item.ZipMoved {
+			addCandidate(builder, item, item.ZipPath, "zip", false)
+		}
 		return
 	}
 	needsReview := item.Status == model.StatusError ||
@@ -97,22 +99,38 @@ func addItem(builder *reviewBuilder, item model.Item) {
 
 	switch item.Verdict {
 	case model.VerdictDeleteCandidate:
-		addCandidate(builder, item, item.ZipPath, "zip", needsReview)
-		if item.FolderPath != "" {
-			if _, err := os.Lstat(item.FolderPath); err != nil {
+		if !item.ZipMoved {
+			addCandidate(builder, item, item.ZipPath, "zip", needsReview)
+		}
+		if !item.FolderMoved && item.FolderPath != "" {
+			_, zipErr := os.Lstat(item.ZipPath)
+			_, folderErr := os.Lstat(item.FolderPath)
+			if item.ZipMoved || item.ZipPath == "" || zipErr != nil || folderErr != nil {
 				addCandidate(builder, item, item.FolderPath, "folder", true)
 			}
 		}
 	case model.VerdictKeepArchive:
-		addCandidate(builder, item, item.ZipPath, "zip", needsReview)
+		if !item.ZipMoved {
+			addCandidate(builder, item, item.ZipPath, "zip", needsReview)
+		}
 	case model.VerdictKeepDirectory:
-		addCandidate(builder, item, item.FolderPath, "folder", needsReview)
+		if !item.FolderMoved {
+			addCandidate(builder, item, item.FolderPath, "folder", needsReview)
+		}
 	case model.VerdictMismatch, model.VerdictUnverified:
-		addCandidate(builder, item, item.ZipPath, "zip", true)
-		addCandidate(builder, item, item.FolderPath, "folder", true)
+		if !item.ZipMoved {
+			addCandidate(builder, item, item.ZipPath, "zip", true)
+		}
+		if !item.FolderMoved {
+			addCandidate(builder, item, item.FolderPath, "folder", true)
+		}
 	case model.VerdictAmbiguous:
-		addCandidate(builder, item, item.ZipPath, "zip", true)
-		addCandidate(builder, item, item.FolderPath, "folder", true)
+		if !item.ZipMoved {
+			addCandidate(builder, item, item.ZipPath, "zip", true)
+		}
+		if !item.FolderMoved {
+			addCandidate(builder, item, item.FolderPath, "folder", true)
+		}
 		for _, folder := range item.RelatedFolders {
 			addCandidate(builder, item, folder, "folder", true)
 		}

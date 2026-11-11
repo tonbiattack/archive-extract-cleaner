@@ -20,7 +20,6 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/removal"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/transfer"
-	"github.com/tonbiattack/archive-extract-cleaner/internal/verify"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
 
@@ -79,14 +78,6 @@ type DeleteProgress struct {
 	Total int    `json:"total"`
 	Name  string `json:"name"`
 	Stage string `json:"stage"`
-}
-
-type DeleteResponse struct {
-	Results []model.DeleteResult `json:"results"`
-	Summary model.Summary        `json:"summary"`
-	Deleted int                  `json:"deleted"`
-	Failed  int                  `json:"failed"`
-	Skipped int                  `json:"skipped"`
 }
 
 func NewApp() *App {
@@ -364,187 +355,6 @@ func (a *App) CandidateIDs(query RowQuery) []string {
 	return ids
 }
 
-func (a *App) PreviewDelete(ids []string) model.DeletePreview {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	preview := model.DeletePreview{}
-	seen := map[string]struct{}{}
-	for _, id := range ids {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		index, ok := a.index[id]
-		if !ok {
-			continue
-		}
-		item := a.items[index]
-		if !item.Deletable() {
-			continue
-		}
-		preview.Count++
-		preview.Bytes += item.Size
-		preview.Items = append(preview.Items, model.DeletePreviewItem{
-			ID:         item.ID,
-			Name:       item.DisplayName(),
-			ZipPath:    item.ZipPath,
-			FolderPath: item.FolderPath,
-			Size:       item.Size,
-		})
-	}
-	return preview
-}
-
-func (a *App) DeleteSelected(ids []string, confirmed bool) (DeleteResponse, error) {
-	if !confirmed {
-		return DeleteResponse{}, errors.New("明示的な確認が必要です")
-	}
-	if len(ids) == 0 {
-		return DeleteResponse{}, errors.New("移動対象が選択されていません")
-	}
-	a.mu.Lock()
-	if a.deleting || a.scanning {
-		a.mu.Unlock()
-		return DeleteResponse{}, errors.New("別の処理を実行中です")
-	}
-	base := a.ctx
-	if base == nil {
-		base = context.Background()
-	}
-	items := append([]model.Item(nil), a.items...)
-	roots := append([]string(nil), a.roots...)
-	limits := a.limits
-	logger := a.log
-	index := a.index
-	mover := a.mover
-	a.deleting = true
-	a.mu.Unlock()
-
-	defer func() {
-		a.mu.Lock()
-		a.deleting = false
-		a.mu.Unlock()
-	}()
-	seen := map[string]struct{}{}
-	results := make([]model.DeleteResult, 0, len(ids))
-	updates := map[string]model.Item{}
-	deleted, failed, skipped := 0, 0, 0
-
-	for position, id := range ids {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		indexInItems, ok := index[id]
-		if !ok {
-			skipped++
-			results = append(results, model.DeleteResult{ID: id, Skipped: true, Reason: "項目が見つかりません", LogPath: a.logPath})
-			continue
-		}
-		item := items[indexInItems]
-		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "revalidating"})
-		if !item.Deletable() {
-			skipped++
-			results = append(results, model.DeleteResult{
-				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Skipped: true, Reason: "移動可能な項目ではありません", LogPath: a.logPath,
-			})
-			a.appendLog(logger, item, false, "移動可能な項目ではありません")
-			continue
-		}
-
-		verification := verify.Verify(base, item.ZipPath, item.FolderPath, verify.Options{Limits: limits, Roots: roots})
-		if verification.Verdict != model.VerdictDeleteCandidate {
-			item.Verdict = verification.Verdict
-			item.Status = model.StatusError
-			item.Reason = "再検証に失敗しました: " + verification.Reason
-			item.Details = verification.Details
-			item.DeleteError = verification.Reason
-			item.CheckedAt = time.Now()
-			updates[id] = item
-			skipped++
-			results = append(results, model.DeleteResult{
-				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Skipped: true, Reason: item.Reason, LogPath: a.logPath,
-			})
-			a.appendLog(logger, item, false, item.Reason)
-			a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "skipped"})
-			continue
-		}
-
-		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "recycling"})
-		removalResult := removal.Delete(base, item.FolderPath, roots, mover)
-		now := time.Now()
-		logItem := item
-		if removalResult.Success {
-			item.Verdict = model.VerdictKeepArchive
-			item.Status = model.StatusDeleted
-			item.DeletedAt = now
-			item.DeleteError = ""
-			item.Details = nil
-			item.MatchMode = ""
-			item.Reason = "Windowsのごみ箱に移動しました"
-			item.Size = item.ZipSize
-			deleted++
-			results = append(results, model.DeleteResult{
-				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Success: true, Reason: removalResult.Reason, DeletedAt: now, LogPath: a.logPath,
-			})
-			a.appendLog(logger, logItem, true, "")
-		} else {
-			item.Verdict = model.VerdictUnverified
-			item.Status = model.StatusError
-			item.Reason = "ごみ箱への移動に失敗しました: " + removalResult.Reason
-			item.DeleteError = removalResult.Reason
-			item.CheckedAt = now
-			failed++
-			results = append(results, model.DeleteResult{
-				ID: item.ID, Name: item.DisplayName(), ZipPath: item.ZipPath, FolderPath: item.FolderPath,
-				Reason: item.Reason, DeletedAt: now, LogPath: a.logPath,
-			})
-			a.appendLog(logger, logItem, false, item.Reason)
-		}
-		updates[id] = item
-		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(ids), Name: item.DisplayName(), Stage: "done"})
-	}
-
-	a.mu.Lock()
-	for id, item := range updates {
-		if position, ok := a.index[id]; ok {
-			a.items[position] = item
-		}
-	}
-	old := a.summary
-	summary := model.Summarize(a.items)
-	summary.ScannedAt = old.ScannedAt
-	summary.DurationMS = old.DurationMS
-	a.summary = summary
-	a.mu.Unlock()
-
-	response := DeleteResponse{Results: results, Summary: summary, Deleted: deleted, Failed: failed, Skipped: skipped}
-	a.emit("delete:done", response)
-	return response, nil
-}
-
-func (a *App) appendLog(logger *oplog.Logger, item model.Item, success bool, message string) {
-	if logger == nil {
-		return
-	}
-	err := logger.Append(oplog.Entry{
-		Time:       time.Now(),
-		Action:     "recycle",
-		ID:         item.ID,
-		ZipPath:    item.ZipPath,
-		FolderPath: item.FolderPath,
-		Verdict:    string(item.Verdict),
-		Success:    success,
-		Error:      message,
-	})
-	if err != nil {
-		a.emit("delete:log_error", err.Error())
-	}
-}
-
 func (a *App) PickFolder() (string, error) {
 	if a.ctx == nil {
 		return "", errors.New("アプリケーションが初期化されていません")
@@ -555,23 +365,41 @@ func (a *App) PickFolder() (string, error) {
 }
 
 func (a *App) OpenInExplorer(path string) error {
-	if path == "" {
-		return errors.New("パスが空です")
-	}
-	abs, err := winpath.CleanAbs(path)
+	name, args, err := explorerCommand(path)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(abs); err != nil {
-		return err
+	return exec.Command(name, args...).Start()
+}
+
+func explorerCommand(path string) (string, []string, error) {
+	if path == "" {
+		return "", nil, errors.New("パスが空です")
+	}
+	abs, err := winpath.CleanAbs(path)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", nil, err
 	}
 	switch runtime.GOOS {
 	case "windows":
-		return exec.Command("explorer.exe", "/select,"+abs).Start()
+		if info.IsDir() {
+			return "explorer.exe", []string{abs}, nil
+		}
+		return "explorer.exe", []string{"/select," + abs}, nil
 	case "darwin":
-		return exec.Command("open", "-R", abs).Start()
+		if info.IsDir() {
+			return "open", []string{abs}, nil
+		}
+		return "open", []string{"-R", abs}, nil
 	default:
-		return exec.Command("xdg-open", filepath.Dir(abs)).Start()
+		if info.IsDir() {
+			return "xdg-open", []string{abs}, nil
+		}
+		return "xdg-open", []string{filepath.Dir(abs)}, nil
 	}
 }
 
@@ -592,9 +420,52 @@ func (a *App) RevealItem(id string) error {
 		}
 	}
 	if item.ZipPath != "" {
-		return a.OpenInExplorer(item.ZipPath)
+		if _, err := os.Lstat(item.ZipPath); err == nil {
+			return a.OpenInExplorer(item.ZipPath)
+		}
 	}
-	return errors.New("開けるパスがありません")
+	return errors.New("表示できるパスがありません（既にごみ箱へ移動済み、または消失）")
+}
+
+func (a *App) RevealFolder(id string) error {
+	a.mu.RLock()
+	index, ok := a.index[id]
+	var item model.Item
+	if ok {
+		item = a.items[index]
+	}
+	a.mu.RUnlock()
+	if !ok {
+		return errors.New("項目が見つかりません")
+	}
+	return a.revealKind(item.FolderPath, item.FolderMoved, "解凍済みフォルダ")
+}
+
+func (a *App) RevealZip(id string) error {
+	a.mu.RLock()
+	index, ok := a.index[id]
+	var item model.Item
+	if ok {
+		item = a.items[index]
+	}
+	a.mu.RUnlock()
+	if !ok {
+		return errors.New("項目が見つかりません")
+	}
+	return a.revealKind(item.ZipPath, item.ZipMoved, "ZIP")
+}
+
+func (a *App) revealKind(path string, moved bool, label string) error {
+	if path == "" {
+		return fmt.Errorf("%sのパスがありません", label)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if moved {
+			return fmt.Errorf("%sは既にごみ箱へ移動済みです", label)
+		}
+		return fmt.Errorf("%sが見つかりません: %w", label, err)
+	}
+	return a.OpenInExplorer(path)
 }
 
 func (a *App) CopyText(text string) error {

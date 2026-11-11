@@ -37,6 +37,8 @@ type Row struct {
 	DeletedAt   time.Time `json:"deletedAt"`
 	DeleteError string    `json:"deleteError"`
 	Deletable   bool      `json:"deletable"`
+	ZipMoved    bool      `json:"zipMoved"`
+	FolderMoved bool      `json:"folderMoved"`
 }
 
 type RowPage struct {
@@ -161,5 +163,7 @@ func toRow(item model.Item) Row {
 		DeletedAt:   item.DeletedAt,
 		DeleteError: item.DeleteError,
 		Deletable:   item.Deletable(),
+		ZipMoved:    item.ZipMoved,
+		FolderMoved: item.FolderMoved,
 	}
 }

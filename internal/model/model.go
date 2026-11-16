@@ -15,9 +15,13 @@ const (
 	VerdictKeepArchive     Verdict = "KEEP_ARCHIVE"
 	VerdictKeepDirectory   Verdict = "KEEP_DIRECTORY"
 	VerdictDeleteCandidate Verdict = "DELETE_CANDIDATE"
-	VerdictMismatch        Verdict = "MISMATCH"
-	VerdictAmbiguous       Verdict = "AMBIGUOUS"
-	VerdictUnverified      Verdict = "UNVERIFIED"
+	// VerdictDeleteCandidateIgnorable は、差分がOSやアーカイバが自動生成する
+	// 補助ファイル（__MACOSX/、.DS_Store など）だけである組。
+	// 共通部分の内容は SHA-256 で完全一致を確認済みであることを前提とする。
+	VerdictDeleteCandidateIgnorable Verdict = "DELETE_CANDIDATE_IGNORABLE"
+	VerdictMismatch                 Verdict = "MISMATCH"
+	VerdictAmbiguous                Verdict = "AMBIGUOUS"
+	VerdictUnverified               Verdict = "UNVERIFIED"
 )
 
 func (v Verdict) IsKeep() bool {
@@ -26,6 +30,11 @@ func (v Verdict) IsKeep() bool {
 
 func (v Verdict) IsProblem() bool {
 	return v == VerdictMismatch || v == VerdictAmbiguous || v == VerdictUnverified
+}
+
+// IsDeleteCandidate は削除候補として扱える判定かを返す。
+func (v Verdict) IsDeleteCandidate() bool {
+	return v == VerdictDeleteCandidate || v == VerdictDeleteCandidateIgnorable
 }
 
 type Status string
@@ -58,19 +67,22 @@ type Item struct {
 	Details        []string  `json:"details,omitempty"`
 	RelatedFolders []string  `json:"relatedFolders,omitempty"`
 	MatchMode      MatchMode `json:"matchMode,omitempty"`
-	FileCount      int       `json:"fileCount"`
-	DirCount       int       `json:"dirCount"`
-	ZipEntries     int       `json:"zipEntries"`
-	ComparedBytes  int64     `json:"comparedBytes"`
-	CheckedAt      time.Time `json:"checkedAt"`
-	DeletedAt      time.Time `json:"deletedAt,omitempty"`
-	DeleteError    string    `json:"deleteError,omitempty"`
-	ZipMoved       bool      `json:"zipMoved"`
-	FolderMoved    bool      `json:"folderMoved"`
+	// NameVariant は ZIP名とフォルダ名が完全一致せず、重複名の接尾辞を
+	// 除いた正規化名で対応したことを示す。
+	NameVariant   bool      `json:"nameVariant,omitempty"`
+	FileCount     int       `json:"fileCount"`
+	DirCount      int       `json:"dirCount"`
+	ZipEntries    int       `json:"zipEntries"`
+	ComparedBytes int64     `json:"comparedBytes"`
+	CheckedAt     time.Time `json:"checkedAt"`
+	DeletedAt     time.Time `json:"deletedAt,omitempty"`
+	DeleteError   string    `json:"deleteError,omitempty"`
+	ZipMoved      bool      `json:"zipMoved"`
+	FolderMoved   bool      `json:"folderMoved"`
 }
 
 func (i Item) Deletable() bool {
-	if i.Verdict != VerdictDeleteCandidate || i.Status == StatusDeleted {
+	if !i.Verdict.IsDeleteCandidate() || i.Status == StatusDeleted {
 		return false
 	}
 	return (i.ZipPath != "" && !i.ZipMoved) || (i.FolderPath != "" && !i.FolderMoved)
@@ -104,18 +116,34 @@ type Summary struct {
 	DeletedCount   int             `json:"deletedCount"`
 	ScannedAt      time.Time       `json:"scannedAt"`
 	DurationMS     int64           `json:"durationMs"`
+	// BytesByVerdict は判定ごとの対象サイズ。
+	// 削除候補はフォルダサイズ、ZIP保持はZIPサイズ、それ以外はフォルダ側のサイズ。
+	BytesByVerdict map[Verdict]int64 `json:"bytesByVerdict"`
+	// ZipBytes / FolderBytes は種別ごとの合計。二重計上を避けるため分けて持つ。
+	ZipBytes    int64 `json:"zipBytes"`
+	FolderBytes int64 `json:"folderBytes"`
 }
 
 func Summarize(items []Item) Summary {
-	s := Summary{ByVerdict: map[Verdict]int{}}
+	s := Summary{
+		ByVerdict:      map[Verdict]int{},
+		BytesByVerdict: map[Verdict]int64{},
+	}
 	for _, item := range items {
 		s.Total++
 		s.ByVerdict[item.Verdict]++
+		s.BytesByVerdict[item.Verdict] += itemSizeForVerdict(item)
+		if item.ZipPath != "" {
+			s.ZipBytes += item.ZipSize
+		}
+		if item.FolderPath != "" {
+			s.FolderBytes += item.FolderSize
+		}
 		if item.Status == StatusDeleted {
 			s.DeletedCount++
 			continue
 		}
-		if item.Verdict == VerdictDeleteCandidate {
+		if item.Verdict.IsDeleteCandidate() {
 			s.CandidateCount++
 			s.CandidateBytes += item.Size
 		}
@@ -127,6 +155,28 @@ func Summarize(items []Item) Summary {
 		}
 	}
 	return s
+}
+
+// itemSizeForVerdict は判定ごとの代表サイズを返す。
+// 削除候補は実際に移動するフォルダのサイズ、ZIP保持はZIPのサイズを使う。
+func itemSizeForVerdict(item Item) int64 {
+	switch item.Verdict {
+	case VerdictKeepArchive:
+		if item.ZipSize > 0 {
+			return item.ZipSize
+		}
+		return item.Size
+	case VerdictDeleteCandidate, VerdictDeleteCandidateIgnorable:
+		if item.Size > 0 {
+			return item.Size
+		}
+		return item.FolderSize
+	default:
+		if item.FolderSize > 0 {
+			return item.FolderSize
+		}
+		return item.Size
+	}
 }
 
 type Phase string
@@ -149,6 +199,8 @@ type Progress struct {
 	Total      int    `json:"total"`
 	Bytes      int64  `json:"bytes"`
 	ElapsedMS  int64  `json:"elapsedMs"`
+	// ETAMS は照合フェーズの残り時間の推定値。算出できない場合は -1。
+	ETAMS int64 `json:"etaMs"`
 }
 
 type Limits struct {
@@ -198,18 +250,20 @@ func SortItems(items []Item) {
 		switch v {
 		case VerdictDeleteCandidate:
 			return 0
-		case VerdictMismatch:
+		case VerdictDeleteCandidateIgnorable:
 			return 1
-		case VerdictAmbiguous:
+		case VerdictMismatch:
 			return 2
-		case VerdictUnverified:
+		case VerdictAmbiguous:
 			return 3
-		case VerdictKeepArchive:
+		case VerdictUnverified:
 			return 4
-		case VerdictKeepDirectory:
+		case VerdictKeepArchive:
 			return 5
-		default:
+		case VerdictKeepDirectory:
 			return 6
+		default:
+			return 7
 		}
 	}
 	sort.SliceStable(items, func(i, j int) bool {

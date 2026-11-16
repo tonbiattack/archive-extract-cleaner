@@ -6,22 +6,37 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/archive"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/cache"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/fswalk"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/verify"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
-	"github.com/tonbiattack/archive-extract-cleaner/internal/ziparchive"
 )
+
+// maxVerifyWorkers は照合の並列度の上限。ディスクとCPUを占有しすぎない範囲に抑える。
+const maxVerifyWorkers = 16
 
 type Options struct {
 	Roots     []string
 	Recursive bool
 	Limits    model.Limits
-	Progress  func(model.Progress)
+	// Workers は照合の並列度。0 以下なら既定値（CPU数、上限8）を使う。
+	Workers  int
+	Progress func(model.Progress)
+	// Hashes は ZIP エントリのハッシュキャッシュ。省略可能。
+	Hashes verify.HashCache
+	// Previous は前回のスキャン結果。差分スキャンに使う。省略可能。
+	Previous *cache.RootRecord
+	// Full が true ならキャッシュを使わず全件を再検証する。
+	Full bool
 }
 
 type Result struct {
@@ -32,6 +47,24 @@ type Result struct {
 	Roots        []string
 	StartedAt    time.Time
 	FinishedAt   time.Time
+	// キャッシュ利用状況。ログ・UI・テストでの比較に使う。
+	Cache CacheStats
+	// Records は次回の差分スキャン用に保存する項目記録。
+	Records []cache.ItemRecord
+	// FolderTrees は保存対象のフォルダ指紋（項目IDごと）を引くための情報。
+	FolderPrints map[string]*cache.FolderFingerprint
+}
+
+// CacheStats はキャッシュの利用状況。
+type CacheStats struct {
+	// ReusedItems は前回結果を再利用した項目数。
+	ReusedItems int
+	// VerifiedItems は今回検証した項目数。
+	VerifiedItems int
+	// CachedHashes はキャッシュから復元した ZIP エントリ数。
+	CachedHashes int
+	// ComputedHashes は実際に展開して計算した ZIP エントリ数。
+	ComputedHashes int
 }
 
 type walkState struct {
@@ -40,7 +73,7 @@ type walkState struct {
 	limits       model.Limits
 	visited      map[string]struct{}
 	entries      map[string][]os.DirEntry
-	dirIndex     map[string]map[string][]candidate
+	dirIndex     map[string]*dirCandidates
 	archives     map[string]int64
 	directDirs   map[string]struct{}
 	scanned      int
@@ -48,6 +81,7 @@ type walkState struct {
 	compared     int64
 	progress     func(model.Progress)
 	started      time.Time
+	verifyStart  time.Time
 	lastEmit     time.Time
 	warnings     []string
 	warningTotal int
@@ -57,6 +91,9 @@ type candidate struct {
 	path   string
 	unsafe bool
 	reason string
+	// nameVariant は ZIP名とフォルダ名が完全一致せず、重複名の接尾辞を
+	// 除いた正規化名で一致した場合に true。
+	nameVariant bool
 }
 
 func Scan(ctx context.Context, opts Options) (*Result, error) {
@@ -74,7 +111,7 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 		limits:     limits,
 		visited:    map[string]struct{}{},
 		entries:    map[string][]os.DirEntry{},
-		dirIndex:   map[string]map[string][]candidate{},
+		dirIndex:   map[string]*dirCandidates{},
 		archives:   map[string]int64{},
 		directDirs: map[string]struct{}{},
 		progress:   opts.Progress,
@@ -148,9 +185,15 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 
+	// candidates() は内部キャッシュを書き換えるため、並列化の前に逐次で確定させる。
+	archiveCandidates := make(map[string][]candidate, len(archivePaths))
+	for _, archivePath := range archivePaths {
+		archiveCandidates[archivePath] = state.candidates(archivePath)
+	}
+
 	usedFolders := map[string]struct{}{}
 	for _, archivePath := range archivePaths {
-		for _, c := range state.candidates(archivePath) {
+		for _, c := range archiveCandidates[archivePath] {
 			usedFolders[winpath.Key(c.path)] = struct{}{}
 		}
 	}
@@ -166,31 +209,57 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 	})
 
 	total := len(archivePaths) + len(folderPaths)
+	state.verifyStart = time.Now()
 	state.emit(model.PhaseVerifying, "", total)
 
-	items := make([]model.Item, 0, total)
-	for _, archivePath := range archivePaths {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	workers := opts.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
 		}
-		item := analyzeArchive(ctx, archivePath, state, limits, roots, &usedFolders)
-		state.compared += item.ComparedBytes
-		state.completed++
-		state.emit(model.PhaseVerifying, archivePath, total)
-		state.lastEmit = time.Now()
-		items = append(items, item)
+	}
+	if workers > maxVerifyWorkers {
+		workers = maxVerifyWorkers
+	}
+	if workers > total {
+		workers = total
+	}
+	if workers < 1 {
+		workers = 1
 	}
 
-	for _, folder := range folderPaths {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		item := folderItem(ctx, folder, limits)
-		state.completed++
-		state.emit(model.PhaseVerifying, folder, total)
-		state.lastEmit = time.Now()
-		items = append(items, item)
+	tasks := make([]verifyTask, 0, total)
+	for _, archivePath := range archivePaths {
+		tasks = append(tasks, verifyTask{archivePath: archivePath, candidates: archiveCandidates[archivePath]})
 	}
+	for _, folder := range folderPaths {
+		tasks = append(tasks, verifyTask{folderPath: folder})
+	}
+
+	// 差分スキャン。前回結果があり、対象のフォルダ指紋と ZIP の同一性が
+	// 変わっていない項目だけを再利用する。判定に迷う要素があれば再検証する。
+	stats := &cacheStats{}
+	walker := newFolderWalker()
+	prev := (*previousIndex)(nil)
+	// メタデータや中央ディレクトリだけでは内容変更を確実に検出できない。
+	// 内容に基づく安全な再利用方法を実装するまで、前回判定は使用しない。
+
+	items, compared, err := runVerifyTasks(ctx, tasks, workers, limits, roots, state, total, scanOptions{
+		// ZIP内の圧縮データが同じとは限らないためハッシュも再利用しない。
+		hashes: nil,
+		stats:  stats,
+		walker: walker,
+		prev:   prev,
+		full:   opts.Full,
+	})
+	if err != nil {
+		return nil, err
+	}
+	state.compared = compared
+	state.completed = total
+
+	records := buildRecords(ctx, items, limits, walker, opts.Previous, stats)
 
 	model.SortItems(items)
 	finished := time.Now()
@@ -208,6 +277,8 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 		Roots:        roots,
 		StartedAt:    started,
 		FinishedAt:   finished,
+		Cache:        stats.snapshot(),
+		Records:      records,
 	}, nil
 }
 
@@ -307,16 +378,16 @@ func (s *walkState) walk(ctx context.Context, absDir string, depth int) error {
 			}
 			continue
 		}
-		if !strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
+		if !archive.IsSupported(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
-			s.warn("ZIPを確認できません: " + full + ": " + err.Error())
+			s.warn("アーカイブを確認できません: " + full + ": " + err.Error())
 			continue
 		}
 		if !info.Mode().IsRegular() {
-			s.warn("通常ファイルではないZIPを無視します: " + full)
+			s.warn("通常ファイルではないアーカイブを無視します: " + full)
 			continue
 		}
 		s.archives[full] = info.Size()
@@ -350,6 +421,31 @@ func (s *walkState) emit(phase model.Phase, current string, total int) {
 	})
 }
 
+// emitVerifying は並列ワーカーの進捗を通知する。completed/bytes は呼び出し側で確定させる。
+func (s *walkState) emitVerifying(current string, total, completed int, bytes int64) {
+	if s.progress == nil {
+		return
+	}
+	eta := int64(-1)
+	if completed > 0 && total > completed && !s.verifyStart.IsZero() {
+		if elapsed := time.Since(s.verifyStart).Milliseconds(); elapsed > 0 {
+			eta = elapsed * int64(total-completed) / int64(completed)
+		}
+	}
+	s.progress(model.Progress{
+		Phase:      model.PhaseVerifying,
+		Current:    current,
+		WalkedDirs: s.scanned,
+		Archives:   len(s.archives),
+		Folders:    len(s.directDirs),
+		Completed:  completed,
+		Total:      total,
+		Bytes:      bytes,
+		ElapsedMS:  time.Since(s.started).Milliseconds(),
+		ETAMS:      eta,
+	})
+}
+
 func (s *walkState) candidates(archivePath string) []candidate {
 	parent := filepath.Dir(archivePath)
 	base := strings.ToLower(strings.TrimSuffix(filepath.Base(archivePath), filepath.Ext(archivePath)))
@@ -367,25 +463,89 @@ func (s *walkState) candidates(archivePath string) []candidate {
 			}
 			s.entries[parent] = entries
 		}
-		index = map[string][]candidate{}
+		index = &dirCandidates{exact: map[string][]candidate{}, normalized: map[string][]candidate{}}
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
 			full := filepath.Join(parent, entry.Name())
+			name := strings.ToLower(entry.Name())
 			unsafe, err := winpath.IsReparsePoint(full)
 			if err != nil {
-				index[strings.ToLower(entry.Name())] = append(index[strings.ToLower(entry.Name())], candidate{path: full, unsafe: true, reason: err.Error()})
+				index.exact[name] = append(index.exact[name], candidate{path: full, unsafe: true, reason: err.Error()})
 				continue
 			}
-			index[strings.ToLower(entry.Name())] = append(index[strings.ToLower(entry.Name())], candidate{path: full, unsafe: unsafe, reason: "リンク/ジャンクション"})
+			c := candidate{path: full, unsafe: unsafe, reason: "リンク/ジャンクション"}
+			index.exact[name] = append(index.exact[name], c)
+			normalized := normalizeDuplicateName(name)
+			index.normalized[normalized] = append(index.normalized[normalized], c)
 		}
 		s.dirIndex[parent] = index
 	}
-	return index[base]
+	if exact := index.exact[base]; len(exact) > 0 {
+		return exact
+	}
+
+	// 完全一致がない場合だけ、重複名の接尾辞を除いた正規化名で探す。
+	// 例: "photos.zip" に対する "photos (1)"、"photos - コピー"、"photos_2"。
+	variants := index.normalized[normalizeDuplicateName(base)]
+	if len(variants) == 0 {
+		return nil
+	}
+	result := make([]candidate, 0, len(variants))
+	for _, c := range variants {
+		// 正規化前の名前が同じものは exact で拾い済みなので除外する。
+		if strings.EqualFold(filepath.Base(c.path), base) {
+			continue
+		}
+		c.nameVariant = true
+		result = append(result, c)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].path) < strings.ToLower(result[j].path)
+	})
+	return result
 }
 
-func analyzeArchive(ctx context.Context, archivePath string, state *walkState, limits model.Limits, roots []string, usedFolders *map[string]struct{}) model.Item {
+// dirCandidates は親ディレクトリ内の候補フォルダの索引。
+// exact は小文字名そのまま、normalized は重複名の接尾辞を除いた名前で引く。
+type dirCandidates struct {
+	exact      map[string][]candidate
+	normalized map[string][]candidate
+}
+
+// duplicateSuffixPatterns は Windows やブラウザが重複名に付ける接尾辞。
+// 小文字化済みの名前に対して適用する。
+var duplicateSuffixPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`\s*\(\d+\)$`),               // " (1)", "(2)"
+	regexp.MustCompile(`\s*-\s*コピー(\s*\(\d+\))?$`),  // " - コピー"
+	regexp.MustCompile(`\s*-\s*copy(\s*\(\d+\))?$`), // " - Copy"
+	regexp.MustCompile(`_\d+$`),                     // "_2"
+	regexp.MustCompile(`\s+のコピー(\s*\(\d+\))?$`),     // " のコピー"
+}
+
+// normalizeDuplicateName は重複名の接尾辞を繰り返し取り除く。
+// 取り除いた結果が空になる場合は元の名前を返す。
+// 戻り値は小文字化されている。
+func normalizeDuplicateName(name string) string {
+	current := strings.ToLower(strings.TrimSpace(name))
+	for i := 0; i < 3; i++ {
+		trimmed := current
+		for _, pattern := range duplicateSuffixPatterns {
+			trimmed = pattern.ReplaceAllString(trimmed, "")
+		}
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed == "" || trimmed == current {
+			return current
+		}
+		current = trimmed
+	}
+	return current
+}
+
+func analyzeArchive(ctx context.Context, task verifyTask, zipSize int64, limits model.Limits, roots []string, scanOpts scanOptions) model.Item {
+	archivePath := task.archivePath
+	candidates := task.candidates
 	base := strings.TrimSuffix(filepath.Base(archivePath), filepath.Ext(archivePath))
 	item := model.Item{
 		ID:         model.MakeID(archivePath, ""),
@@ -393,28 +553,24 @@ func analyzeArchive(ctx context.Context, archivePath string, state *walkState, l
 		ZipPath:    archivePath,
 		ParentPath: filepath.Dir(archivePath),
 		Name:       base,
-		ZipSize:    state.archives[archivePath],
-		Size:       state.archives[archivePath],
+		ZipSize:    zipSize,
+		Size:       zipSize,
 		CheckedAt:  time.Now(),
 	}
-	candidates := state.candidates(archivePath)
 	if len(candidates) == 1 {
 		item.FolderPath = candidates[0].path
 		item.ID = model.MakeID(archivePath, candidates[0].path)
 	}
-	for _, c := range candidates {
-		(*usedFolders)[winpath.Key(c.path)] = struct{}{}
-	}
 
-	archive, err := ziparchive.Open(archivePath, limits)
+	opened, err := archive.Open(archivePath, limits)
 	if err != nil {
 		item.Verdict = model.VerdictUnverified
-		item.Reason = "ZIPを検証できません: " + err.Error()
+		item.Reason = describeArchiveError(err)
 		item.Details = []string{err.Error()}
 		return item
 	}
-	item.ZipEntries = archive.EntryCount
-	_ = archive.Close()
+	item.ZipEntries = opened.EntryCount()
+	_ = opened.Close()
 
 	if len(candidates) == 0 {
 		item.Verdict = model.VerdictKeepArchive
@@ -425,7 +581,7 @@ func analyzeArchive(ctx context.Context, archivePath string, state *walkState, l
 		item.Verdict = model.VerdictAmbiguous
 		item.FolderPath = ""
 		item.Size = 0
-		item.Reason = "同名の解凍済みフォルダが複数あるため自動判定できません"
+		item.Reason = "対応する解凍済みフォルダの候補が複数あるため自動判定できません"
 		for _, c := range candidates {
 			item.Details = append(item.Details, c.path)
 			item.RelatedFolders = append(item.RelatedFolders, c.path)
@@ -438,8 +594,15 @@ func analyzeArchive(ctx context.Context, archivePath string, state *walkState, l
 		item.Reason = "候補フォルダを安全に扱えません: " + selected.reason
 		return item
 	}
+	// 名前が完全一致していない組は、削除候補になった場合にその旨を明示する。
+	nameVariant := selected.nameVariant
 
-	result := verify.Verify(ctx, archivePath, selected.path, verify.Options{Limits: limits, Roots: roots})
+	result := verify.Verify(ctx, archivePath, selected.path, verify.Options{
+		Limits: limits,
+		Roots:  roots,
+		Hashes: scanOpts.hashes,
+		Tree:   task.tree,
+	})
 	item.Verdict = result.Verdict
 	item.Reason = result.Reason
 	item.Details = result.Details
@@ -452,10 +615,29 @@ func analyzeArchive(ctx context.Context, archivePath string, state *walkState, l
 	if result.ZipEntries > 0 {
 		item.ZipEntries = result.ZipEntries
 	}
+	if scanOpts.stats != nil {
+		scanOpts.stats.addHashes(result.CachedHashes, result.ComputedHashes)
+	}
+	if nameVariant && result.Verdict.IsDeleteCandidate() {
+		item.NameVariant = true
+		item.Details = append([]string{
+			fmt.Sprintf("ZIP名とフォルダ名が異なります（%s / %s）", filepath.Base(archivePath), filepath.Base(selected.path)),
+		}, item.Details...)
+		item.Details = capDetails(item.Details)
+	}
 	return item
 }
 
-func folderItem(ctx context.Context, folder string, limits model.Limits) model.Item {
+// capDetails は詳細の件数上限を適用する。
+func capDetails(details []string) []string {
+	const limit = 51
+	if len(details) <= limit {
+		return details
+	}
+	return details[:limit]
+}
+
+func folderItem(ctx context.Context, folder string, limits model.Limits, tree *fswalk.Tree) model.Item {
 	item := model.Item{
 		ID:         model.MakeID("", folder),
 		Verdict:    model.VerdictKeepDirectory,
@@ -477,8 +659,179 @@ func folderItem(ctx context.Context, folder string, limits model.Limits) model.I
 		item.Reason = "リンク/ジャンクションのため走査しません"
 		return item
 	}
+	if tree != nil {
+		item.FolderSize = tree.Size
+		item.Size = tree.Size
+		item.FileCount = tree.FileCount
+		item.DirCount = tree.DirCount
+		return item
+	}
 	size := fswalk.BestEffortSize(ctx, folder)
 	item.FolderSize = size
 	item.Size = size
 	return item
+}
+
+// verifyTask は1件の照合単位。archivePath が空ならフォルダ単独の項目。
+type verifyTask struct {
+	archivePath string
+	folderPath  string
+	candidates  []candidate
+	// reused は前回結果を再利用する場合の項目。空なら再検証する。
+	reused *cache.ItemRecord
+	// tree は差分スキャンで走査済みのツリー。再利用判定で計算したものを渡す。
+	tree *fswalk.Tree
+}
+
+// withReuse はタスクへ再利用情報を付ける。
+func (t verifyTask) withReuse(record cache.ItemRecord, tree *fswalk.Tree) verifyTask {
+	t.reused = &record
+	t.tree = tree
+	return t
+}
+
+// scanOptions は照合時に共有する設定。
+type scanOptions struct {
+	hashes verify.HashCache
+	stats  *cacheStats
+	walker *folderWalker
+	prev   *previousIndex
+	// full が true なら前回結果を一切使わない。
+	full bool
+}
+
+// cacheStats はキャッシュ利用状況をスレッドセーフに集計する。
+type cacheStats struct {
+	mu       sync.Mutex
+	reused   int
+	verified int
+	hashes   int
+	computed int
+}
+
+func (s *cacheStats) addReused() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.reused++
+	s.mu.Unlock()
+}
+
+func (s *cacheStats) addVerified() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.verified++
+	s.mu.Unlock()
+}
+
+func (s *cacheStats) addHashes(cached, computed int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.hashes += cached
+	s.computed += computed
+	s.mu.Unlock()
+}
+
+func (s *cacheStats) snapshot() CacheStats {
+	if s == nil {
+		return CacheStats{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return CacheStats{
+		ReusedItems:    s.reused,
+		VerifiedItems:  s.verified,
+		CachedHashes:   s.hashes,
+		ComputedHashes: s.computed,
+	}
+}
+
+// runVerifyTasks は照合をワーカー数だけ並列実行する。
+// 結果の順序は tasks の順序に固定し、進捗は共有カウンタから間引いて通知する。
+func runVerifyTasks(ctx context.Context, tasks []verifyTask, workers int, limits model.Limits, roots []string, state *walkState, total int, opts scanOptions) ([]model.Item, int64, error) {
+	items := make([]model.Item, len(tasks))
+	if len(tasks) == 0 {
+		return items, 0, nil
+	}
+
+	var mu sync.Mutex
+	var completed int
+	var compared int64
+	lastEmit := time.Time{}
+
+	emit := func(current string) {
+		if state.progress == nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Since(lastEmit) < 100*time.Millisecond {
+			return
+		}
+		lastEmit = time.Now()
+		state.emitVerifying(current, total, completed, compared)
+	}
+
+	indexes := make(chan int)
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for index := range indexes {
+			if ctx.Err() != nil {
+				continue
+			}
+			task := tasks[index]
+			current := task.folderPath
+			var item model.Item
+			if !opts.full && opts.prev != nil {
+				if record, tree, ok := opts.prev.canReuse(task, limits, opts.walker, ctx); ok {
+					task = task.withReuse(record, tree)
+				}
+			}
+			if task.reused != nil {
+				item = itemFromRecord(*task.reused)
+				opts.stats.addReused()
+			} else if task.archivePath != "" {
+				current = task.archivePath
+				item = analyzeArchive(ctx, task, state.archives[task.archivePath], limits, roots, opts)
+				opts.stats.addVerified()
+			} else {
+				item = folderItem(ctx, task.folderPath, limits, task.tree)
+				opts.stats.addVerified()
+			}
+			items[index] = item
+			mu.Lock()
+			completed++
+			compared += item.ComparedBytes
+			mu.Unlock()
+			emit(current)
+		}
+	}
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go worker()
+	}
+
+	for index := range tasks {
+		if ctx.Err() != nil {
+			break
+		}
+		indexes <- index
+	}
+	close(indexes)
+	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	mu.Lock()
+	done, bytes := completed, compared
+	mu.Unlock()
+	state.emitVerifying("", total, done, bytes)
+	return items, bytes, nil
 }

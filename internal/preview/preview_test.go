@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/archive"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
 )
@@ -136,5 +138,44 @@ func TestListFolderTruncates(t *testing.T) {
 	}
 	if !truncated || len(entries) != 2 {
 		t.Fatalf("entries = %d, truncated = %v", len(entries), truncated)
+	}
+}
+
+func TestListSevenZipArchive(t *testing.T) {
+	if !archive.ToolAvailable() {
+		t.Skip("7-Zip CLI is not available")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "photos")
+	if err := testutil.WriteFile(source, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.MakeDir(source, "emptydir"); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "photos.7z")
+	cmd := exec.Command(archive.ToolPath(), "a", "-t7z", target, filepath.Join(source, "*"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot create 7z: %v: %s", err, out)
+	}
+
+	entries, truncated, err := ListZIP(target, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Fatal("should not be truncated")
+	}
+	var sawFile, sawDir bool
+	for _, entry := range entries {
+		if entry.Path == "a.txt" && entry.Kind == "file" && entry.Size == 5 {
+			sawFile = true
+		}
+		if entry.Path == "emptydir" && entry.Kind == "directory" {
+			sawDir = true
+		}
+	}
+	if !sawFile || !sawDir {
+		t.Fatalf("entries = %+v", entries)
 	}
 }

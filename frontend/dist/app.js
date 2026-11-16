@@ -40,6 +40,14 @@
     configPath: "",
     configWarning: "",
     limits: null,
+    workers: 0,
+    ai: null,
+    suggestions: null,
+    lastCache: null,
+    cacheInfo: null,
+    archiveInfo: null,
+    dashboard: null,
+    dashboardCollapsed: false,
     multiDriveCopyScript: "",
     multiDriveCopyPreset: "",
     multiDriveCopyAvailable: false,
@@ -351,6 +359,7 @@
 
   const VERDICT_LABEL = {
     DELETE_CANDIDATE: "削除候補",
+    DELETE_CANDIDATE_IGNORABLE: "補助差分のみ",
     MISMATCH: "不一致",
     UNVERIFIED: "未検証",
     AMBIGUOUS: "曖昧",
@@ -574,6 +583,7 @@
       esc(row.folderPath) +
       '">' +
       esc(folderName || "—") +
+      (row.nameVariant ? ' <span class="badge badge-variant" title="ZIP名とフォルダ名が異なります（内容一致）">名前差</span>' : "") +
       "</div>" +
       '<div class="cell path-cell" title="' +
       esc(row.parentPath) +
@@ -651,6 +661,9 @@
   function applyMeta(page) {
     if (page.summary) {
       state.summary = page.summary;
+    }
+    if (page.dashboard) {
+      state.dashboard = page.dashboard;
     }
     if (Array.isArray(page.roots)) {
       state.roots = page.roots;
@@ -1017,6 +1030,7 @@
     const summary = state.summary;
     if (!summary) {
       summaryChips.innerHTML = '<span class="chip">総件数 <strong>0</strong></span>';
+      renderDashboard();
       updateWorkflow();
       return;
     }
@@ -1034,6 +1048,10 @@
       '<span class="chip">未検証・曖昧 <strong>' + unverified + "</strong></span>",
       '<span class="chip">保持 <strong>' + keep + "</strong></span>",
     ];
+    const ignorable = byVerdict.DELETE_CANDIDATE_IGNORABLE || 0;
+    if (ignorable) {
+      chips.splice(2, 0, '<span class="chip">補助差分のみ <strong>' + ignorable + "</strong></span>");
+    }
     if (summary.deletedCount) {
       chips.push('<span class="chip">移動済み <strong>' + summary.deletedCount + "</strong></span>");
     }
@@ -1041,6 +1059,7 @@
       chips.push('<span class="chip">所要時間 <strong>' + esc(fmtDuration(summary.durationMs)) + "</strong></span>");
     }
     summaryChips.innerHTML = chips.join("");
+    renderDashboard();
     updateWorkflow();
   }
 
@@ -1102,6 +1121,98 @@
     });
   }
 
+  // cacheStatusText は設定ダイアログ向けのキャッシュ状態を返す。
+  function cacheStatusText() {
+    const cache = state.cacheInfo;
+    if (!cache || !cache.enabled) return "無効";
+    return "安全確認のため再利用を一時停止中";
+  }
+
+  // ---------- dashboard ----------
+
+  // renderDashboard は容量の内訳を描画する。
+  // スキャン全体の値であり、一覧の絞り込みとは独立させる。
+  function renderDashboard() {
+    const panel = el("dashboardPanel");
+    const body = el("dashboardBody");
+    const scope = el("dashboardScope");
+    if (!panel || !body) return;
+    const dash = state.dashboard;
+    if (!dash || !dash.scan || !dash.scan.total || !dash.scan.total.count) {
+      panel.classList.add("hidden");
+      return;
+    }
+    panel.classList.remove("hidden");
+
+    const scan = dash.scan;
+    const moves = dash.moves || {};
+    const cards = [];
+
+    cards.push(
+      '<div class="dash-card reclaim"><span class="dash-label">回収見込み</span>' +
+        '<div class="dash-value">' + esc(fmtBytes(scan.reclaimable.bytes || 0)) + "</div>" +
+        '<div class="dash-sub">削除候補 ' + (scan.reclaimable.count || 0) + " 件（内容一致済みのみ）</div></div>"
+    );
+    cards.push(
+      '<div class="dash-card"><span class="dash-label">ZIPを保持</span>' +
+        '<div class="dash-value">' + esc(fmtBytes(scan.keepArchive.bytes || 0)) + "</div>" +
+        '<div class="dash-sub">' + (scan.keepArchive.count || 0) + " 件</div></div>"
+    );
+    cards.push(
+      '<div class="dash-card"><span class="dash-label">フォルダを保持</span>' +
+        '<div class="dash-value">' + esc(fmtBytes(scan.keepFolder.bytes || 0)) + "</div>" +
+        '<div class="dash-sub">' + (scan.keepFolder.count || 0) + " 件</div></div>"
+    );
+    const excluded = (scan.mismatch.count || 0) + (scan.ambiguous.count || 0) + (scan.unverified.count || 0);
+    const excludedBytes = (scan.mismatch.bytes || 0) + (scan.ambiguous.bytes || 0) + (scan.unverified.bytes || 0);
+    cards.push(
+      '<div class="dash-card excluded"><span class="dash-label">削減対象外</span>' +
+        '<div class="dash-value">' + esc(fmtBytes(excludedBytes)) + "</div>" +
+        '<div class="dash-sub">不一致 ' + (scan.mismatch.count || 0) +
+        " / 曖昧 " + (scan.ambiguous.count || 0) +
+        " / 未検証 " + (scan.unverified.count || 0) + " 件</div></div>"
+    );
+
+    const moved = Number(moves.movedBytes) || 0;
+    const moveCount = (moves.succeeded && moves.succeeded.count) || 0;
+    if (moveCount > 0 || moved > 0) {
+      cards.push(
+        '<div class="dash-card"><span class="dash-label">ごみ箱へ移動した容量</span>' +
+          '<div class="dash-value">' + esc(fmtBytes(moved)) + "</div>" +
+          '<div class="dash-sub">成功 ' + moveCount + " 件" +
+          ((moves.partial && moves.partial.count) ? " / 部分成功 " + moves.partial.count + " 件" : "") +
+          ((moves.failed && moves.failed.count) ? " / 失敗 " + moves.failed.count + " 件" : "") +
+          "</div></div>"
+      );
+    }
+
+    cards.push(
+      '<div class="dash-note">' +
+        "「回収見込み」は内容一致を確認済みの削除候補だけです。不一致・未検証は含めません。" +
+        "ごみ箱へ移動した容量は、ごみ箱を空にするまでディスクの空き容量として戻りません。" +
+        "</div>"
+    );
+
+    body.innerHTML = cards.join("");
+
+    if (dash.filtered) {
+      scope.textContent = "スキャン全体の値（一覧は " + (dash.filteredCount || 0) + " 件に絞り込み中）";
+    } else {
+      scope.textContent = "スキャン全体の値";
+    }
+  }
+
+  // archiveStatusText はアーカイブ対応状況を1行にまとめる。
+  function archiveStatusText() {
+    const info = state.archiveInfo;
+    if (!info) return "ZIP";
+    const formats = Array.isArray(info.formats) ? info.formats.join(" / ") : ".zip";
+    if (!info.toolAvailable) {
+      return formats + "（7z / RAR は 7-Zip 未検出のため検証できません）";
+    }
+    return formats + "（7-Zip: " + (info.toolPath || "検出済み") + "）";
+  }
+
   function showSettings() {
     const limits = state.limits || {};
     let body =
@@ -1112,11 +1223,25 @@
       "<dt>合計展開サイズ上限</dt><dd>" + esc(limits.maxTotalBytes ? fmtBytes(limits.maxTotalBytes) : "—") + "</dd>" +
       "<dt>単一ファイル上限</dt><dd>" + esc(limits.maxFileBytes ? fmtBytes(limits.maxFileBytes) : "—") + "</dd>" +
       "<dt>圧縮率上限</dt><dd>" + esc(limits.maxCompressionRatio || "—") + "</dd>" +
+      "<dt>照合の並列度</dt><dd>" + esc(state.workers ? state.workers + "（設定値）" : "自動") + "</dd>" +
+      "<dt>スキャンキャッシュ</dt><dd>" + esc(cacheStatusText()) + "</dd>" +
+      "<dt>対応アーカイブ</dt><dd>" + esc(archiveStatusText()) + "</dd>" +
+      "<dt>AI連携</dt><dd>" +
+        esc(
+          !state.ai || !state.ai.enabled
+            ? "無効"
+            : state.ai.available
+              ? "有効（" + state.ai.model + "）"
+              : "設定済み・接続情報が不足"
+        ) +
+        "</dd>" +
       "<dt>multi-drive-copy</dt><dd>" + esc(state.multiDriveCopyScript || "—") + (state.multiDriveCopyAvailable ? "" : "（未検出）") + "</dd>" +
       "<dt>転送プリセット</dt><dd>" + esc(state.multiDriveCopyPreset || "設定画面を開く") + "</dd>" +
       "</dl>" +
       '<p class="modal-note">上限を超えたZIPやフォルダは UNVERIFIED となり、削除候補にはなりません。設定ファイルを変更した場合はアプリを再起動してください。</p>' +
-      '<p class="modal-note">multi-drive-copy のスクリプトとプリセットは設定ファイルの <code>multiDriveCopy</code> で指定します。プリセット未指定時は multi-drive-copy の設定画面が開きます。</p>';
+      '<p class="modal-note">multi-drive-copy のスクリプトとプリセットは設定ファイルの <code>multiDriveCopy</code> で指定します。プリセット未指定時は multi-drive-copy の設定画面が開きます。</p>' +
+      '<p class="modal-note">キャッシュの再利用は安全確認のため一時停止中です。通常スキャンでも内容を再照合します。</p>' +
+      '<p class="modal-note">7z / RAR の検証には <a href="https://www.7-zip.org/" target="_blank" rel="noreferrer">7-Zip</a> が必要です。未インストールの環境では 7z / RAR は「未検証」として保持され、削除候補になりません。場所を指定する場合は設定ファイルの <code>archiveTool</code> に <code>7z.exe</code> のフルパスを書いてください。</p>';
     if (state.configWarning) {
       body += '<p class="modal-note">' + esc(state.configWarning) + "</p>";
     }
@@ -1129,9 +1254,27 @@
           className: "btn",
           onClick: () => api("OpenConfig").catch((error) => toast("設定ファイルを開けません: " + error.message, true)),
         },
+        {
+          label: "キャッシュを破棄",
+          className: "btn",
+          onClick: () => clearCache(),
+        },
         { label: "閉じる", className: "btn primary", onClick: closeModal },
       ],
     });
+  }
+
+  async function clearCache() {
+    try {
+      await api("ClearCache");
+      state.cacheInfo = await api("GetCacheState");
+      state.lastCache = null;
+      toast("スキャンキャッシュを破棄しました。次回は完全スキャンになります");
+      closeModal();
+      showSettings();
+    } catch (error) {
+      toast("キャッシュを破棄できません: " + error.message, true);
+    }
   }
 
   // ---------- detail ----------
@@ -1176,17 +1319,20 @@
     } else if (item.status === "deleted") {
       rows.push(["状態", '<span class="result-ok">ごみ箱へ移動済み</span>']);
     }
-    rows.push(["ZIP", item.zipPath || "—"]);
+    rows.push(["アーカイブ", item.zipPath || "—"]);
     rows.push(["解凍済みフォルダ", item.folderPath || "—"]);
+    if (item.nameVariant) {
+      rows.push(["名前の対応", '<span class="badge badge-variant">名前差あり（内容一致）</span>']);
+    }
     rows.push(["親パス", item.parentPath || "—"]);
     rows.push(["対象サイズ", fmtBytes(item.size)]);
-    if (item.zipSize) rows.push(["ZIPサイズ", fmtBytes(item.zipSize)]);
+    if (item.zipSize) rows.push(["アーカイブサイズ", fmtBytes(item.zipSize)]);
     if (item.folderSize) rows.push(["フォルダサイズ", fmtBytes(item.folderSize)]);
     if (item.matchMode) rows.push(["一致方式", MATCH_LABEL[item.matchMode] || item.matchMode]);
     if (item.fileCount || item.dirCount) {
       rows.push(["ファイル / ディレクトリ", (item.fileCount || 0) + " / " + (item.dirCount || 0)]);
     }
-    if (item.zipEntries) rows.push(["ZIPエントリ数", String(item.zipEntries)]);
+    if (item.zipEntries) rows.push(["アーカイブエントリ数", String(item.zipEntries)]);
     if (item.comparedBytes) rows.push(["比較バイト数", fmtBytes(item.comparedBytes)]);
     rows.push(["確認日時", fmtDate(item.checkedAt)]);
     if (item.deletedAt && !String(item.deletedAt).startsWith("0001-")) {
@@ -1196,7 +1342,7 @@
 
     const copyActions = [
       ["name", "名前をコピー"],
-      ["zipPath", "ZIPパスをコピー"],
+      ["zipPath", "アーカイブのパスをコピー"],
       ["folderPath", "フォルダパスをコピー"],
       ["parentPath", "親パスをコピー"],
     ];
@@ -1250,10 +1396,115 @@
         item.details.map((detail) => "<li>" + esc(detail) + "</li>").join("") +
         "</ul></div>";
     }
+    html += renderAISection(item);
     html +=
       '<div class="detail-note">ZIPと解凍済みフォルダのいずれか、または両方をWindowsのごみ箱へ移動できます。完全削除へのフォールバックは行いません。ZIPとフォルダの両方の移動は、最後のローカルコピーを失う可能性があります。</div>';
     detailPane.innerHTML = html;
     renderPreviewSection();
+  }
+
+  const AI_DECISION_LABEL = {
+    delete_folder: "フォルダを削除してよい",
+    delete_zip: "ZIPを削除してよい",
+    delete_both: "両方削除してよい",
+    keep: "保持すべき",
+    unknown: "判断できない",
+  };
+
+  // AIは推薦のみ。削除は既存の完全一致判定を通過した項目だけに限定する。
+  function renderAISection(item) {
+    const stateInfo = state.ai || {};
+    const suggestion = state.suggestions ? state.suggestions[item.id] : null;
+    const alreadyCandidate = item.deletable || item.verdict === "DELETE_CANDIDATE" || item.verdict === "DELETE_CANDIDATE_IGNORABLE";
+    const unverified = item.verdict === "UNVERIFIED";
+    let body = "";
+    if (alreadyCandidate) {
+      body =
+        '<p class="modal-note">この項目は内容の完全一致を確認済みです。AIの判断は不要です。</p>';
+    } else if (unverified) {
+      body =
+        '<p class="modal-note">未検証の項目はAIの対象外です。内容を確認できないため保持してください。</p>';
+    } else if (!stateInfo.enabled) {
+      body =
+        '<p class="modal-note">AI連携は無効です。設定ファイルの <code>ai.enabled</code> と環境変数 <code>' +
+        esc(stateInfo.keyEnv || "ARCHIVE_CLEANER_AI_KEY") +
+        "</code> を設定すると、不一致・曖昧な項目についてAIの推薦を取得できます。</p>";
+    } else if (!stateInfo.available) {
+      body =
+        '<p class="modal-note">AIの接続情報が不足しています。環境変数 <code>' +
+        esc(stateInfo.keyEnv || "ARCHIVE_CLEANER_AI_KEY") +
+        "</code> にAPIキーを設定してください。</p>";
+    } else if (suggestion) {
+      if (suggestion.error) {
+        body = '<p class="modal-note">AIの推薦を取得できませんでした: ' + esc(suggestion.error) + "</p>";
+      } else {
+        const percent = Math.round((Number(suggestion.confidence) || 0) * 100);
+        body =
+          '<dl class="detail-grid"><dt>AIの推薦</dt><dd>' +
+          esc(AI_DECISION_LABEL[suggestion.decision] || suggestion.decision) +
+          "</dd><dt>信頼度</dt><dd>" +
+          percent +
+          "%</dd><dt>モデル</dt><dd>" +
+          esc(suggestion.model || "—") +
+          "</dd></dl>" +
+          (Array.isArray(suggestion.reasons) && suggestion.reasons.length
+            ? '<ul class="detail-list">' +
+              suggestion.reasons.map((reason) => "<li>" + esc(reason) + "</li>").join("") +
+              "</ul>"
+            : "") +
+          '<p class="modal-note">AIの推薦は削除の根拠になりません。内容の完全一致を確認できていないため、この項目は削除できません。</p>';
+      }
+    } else {
+      body =
+        '<p class="modal-note">この項目は内容が一致していません。AIに推薦を求められますが、削除には使用できません。</p>' +
+        '<button class="btn small" data-action="ai-suggest" data-id="' +
+        esc(item.id) +
+        '">AIに推薦を求める</button>';
+    }
+    return (
+      '<div class="detail-block"><div class="detail-title">AIの判断（参考）</div>' + body + "</div>"
+    );
+  }
+
+  async function exportReport(format, button) {
+    if (state.busy) {
+      toast("処理中は書き出せません", true);
+      return;
+    }
+    const label = button ? button.textContent : "";
+    if (button) {
+      button.disabled = true;
+      button.textContent = "書き出し中...";
+    }
+    try {
+      const result = await api("ExportReport", format);
+      toast(result.count + " 件を書き出しました: " + result.path);
+    } catch (error) {
+      toast("書き出しに失敗しました: " + error.message, true);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+  }
+
+  async function requestSuggestion(id, button) {
+    if (!state.suggestions) state.suggestions = {};
+    if (button) {
+      button.disabled = true;
+      button.textContent = "問い合わせ中...";
+    }
+    try {
+      const info = await api("SuggestForItem", id);
+      state.suggestions[id] = info;
+      if (state.detailItem && state.detailItem.id === id) renderDetail(state.detailItem);
+      if (info && info.error) toast(info.error, true);
+    } catch (error) {
+      state.suggestions[id] = { id, error: error.message };
+      if (state.detailItem && state.detailItem.id === id) renderDetail(state.detailItem);
+      toast("AIの推薦を取得できませんでした: " + error.message, true);
+    }
   }
 
   async function loadPreview(id, source, token) {
@@ -1306,7 +1557,7 @@
   }
 
   function previewSourceName(kind) {
-    return kind === "zip" ? "ZIP" : "フォルダ";
+    return kind === "zip" ? "アーカイブ" : "フォルダ";
   }
 
   function renderPreviewSection() {
@@ -1497,7 +1748,8 @@
         " 件 / " +
         fmtBytes(progress.bytes || 0) +
         " / " +
-        fmtDuration(progress.elapsedMs);
+        fmtDuration(progress.elapsedMs) +
+        (progress.etaMs > 0 ? "（残り約 " + fmtDuration(progress.etaMs) + "）" : "");
     } else if (phase === "done") {
       progressLabel.textContent = "照合が完了しました";
       progressFill.classList.remove("indeterminate");
@@ -1525,7 +1777,19 @@
 
   // ---------- scanning ----------
 
-  async function startScan() {
+  // cacheSummaryNote はキャッシュ利用状況を1行にまとめる。0 件なら何も出さない。
+  function cacheSummaryNote(cache) {
+    if (!cache) return "";
+    const reused = Number(cache.reusedItems) || 0;
+    const cachedHashes = Number(cache.cachedHashes) || 0;
+    if (reused <= 0 && cachedHashes <= 0) return "";
+    const parts = [];
+    if (reused > 0) parts.push("前回結果を再利用 " + reused + " 件");
+    if (cachedHashes > 0) parts.push("ZIPハッシュ再利用 " + cachedHashes + " 件");
+    return " / " + parts.join(" / ");
+  }
+
+  async function startScan(full) {
     if (state.busy) return;
     if (state.roots.length === 0) {
       toast("対象フォルダを1つ以上追加してください", true);
@@ -1560,11 +1824,11 @@
     progressPath.textContent = "";
     progressFill.classList.remove("indeterminate");
     progressFill.style.width = "0";
-    setStatus("スキャン中...");
+    setStatus(full ? "完全再スキャン中..." : "スキャン中...");
     updateBusyUI();
     updateSelectionUI();
     try {
-      const info = await api("Scan", state.roots);
+      const info = await api(full ? "Rescan" : "Scan", state.roots);
       state.scanning = false;
       if (info && info.cancelled) {
         setStatus("スキャンを中断しました");
@@ -1575,16 +1839,19 @@
         if (Array.isArray(info.roots)) state.roots = info.roots;
         state.warnings = info.warnings || [];
         state.warningTotal = info.warningTotal || state.warnings.length;
+        state.lastCache = info.cache || null;
         renderRoots();
         renderSummary();
         renderWarnings();
+        const cacheNote = cacheSummaryNote(info.cache);
         setStatus(
           "スキャン完了: " +
             (info.summary.total || 0) +
             " 件 / 削除候補 " +
             (info.summary.candidateCount || 0) +
             " 件 / " +
-            fmtBytes(info.summary.candidateBytes || 0)
+            fmtBytes(info.summary.candidateBytes || 0) +
+            cacheNote
         );
         hideProgressSoon();
         reloadRows(true);
@@ -1605,7 +1872,7 @@
   // ---------- delete ----------
 
   function moveKindLabel(kind) {
-    return kind === "zip" ? "ZIP" : "フォルダ";
+    return kind === "zip" ? "アーカイブ" : "フォルダ";
   }
 
   function methodLabel(method) {
@@ -1697,8 +1964,8 @@
             : '<p class="result-fail">移動できる既存パスがありません。</p>') +
           '<div class="move-choices">' +
           radio("folder", "解凍済みフォルダのみ", !option.canFolder, "") +
-          radio("zip", "ZIPのみ", !option.canZip, "") +
-          radio("both", "ZIPとフォルダの両方（危険）", !option.canBoth, "danger") +
+          radio("zip", "アーカイブのみ", !option.canZip, "") +
+          radio("both", "アーカイブとフォルダの両方（危険）", !option.canBoth, "danger") +
           "</div>" +
           (option.warning ? '<p class="move-warning">' + esc(option.warning) + "</p>" : "") +
           "</div>"
@@ -2288,6 +2555,8 @@
 
   function updateBusyUI() {
     scanBtn.disabled = state.busy || state.roots.length === 0;
+    const rescanBtn = el("rescanBtn");
+    if (rescanBtn) rescanBtn.disabled = state.busy || state.roots.length === 0;
     stopBtn.disabled = !state.scanning;
     browseBtn.disabled = state.busy;
     addRootBtn.disabled = state.busy;
@@ -2371,7 +2640,9 @@
         toast("フォルダ選択に失敗しました: " + error.message, true);
       }
     });
-    scanBtn.addEventListener("click", startScan);
+    scanBtn.addEventListener("click", () => startScan(false));
+    const rescanBtn = el("rescanBtn");
+    if (rescanBtn) rescanBtn.addEventListener("click", () => startScan(true));
     stopBtn.addEventListener("click", () => {
       api("CancelScan").catch((error) => toast(error.message, true));
       setStatus("スキャンの中断を要求しました...");
@@ -2549,6 +2820,11 @@
         api("RevealFolder", folderButton.dataset.id).catch((error) => toast(error.message, true));
         return;
       }
+      const aiButton = event.target.closest('[data-action="ai-suggest"]');
+      if (aiButton) {
+        requestSuggestion(aiButton.dataset.id, aiButton);
+        return;
+      }
       const zipButton = event.target.closest('[data-action="reveal-zip"]');
       if (zipButton) {
         api("RevealZip", zipButton.dataset.id).catch((error) => toast(error.message, true));
@@ -2588,6 +2864,10 @@
       renderRows();
     });
     resetColumnsBtn.addEventListener("click", resetColumnWidths);
+    const exportCsvBtn = el("exportCsvBtn");
+    const exportJsonBtn = el("exportJsonBtn");
+    if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => exportReport("csv", exportCsvBtn));
+    if (exportJsonBtn) exportJsonBtn.addEventListener("click", () => exportReport("json", exportJsonBtn));
     transferBtn.addEventListener("click", openTransferReview);
     deleteBtn.addEventListener("click", beginDelete);
     warningBadge.addEventListener("click", showWarnings);
@@ -2625,6 +2905,16 @@
       api("OpenLog").catch((error) => toast("操作ログを開けません: " + error.message, true));
     });
     settingsBtn.addEventListener("click", showSettings);
+    const dashboardToggle = el("dashboardToggle");
+    const dashboardPanel = el("dashboardPanel");
+    if (dashboardToggle && dashboardPanel) {
+      dashboardToggle.addEventListener("click", () => {
+        state.dashboardCollapsed = !state.dashboardCollapsed;
+        dashboardPanel.classList.toggle("collapsed", state.dashboardCollapsed);
+        dashboardToggle.textContent = state.dashboardCollapsed ? "+" : "−";
+        dashboardToggle.setAttribute("aria-label", state.dashboardCollapsed ? "展開する" : "折りたたむ");
+      });
+    }
 
     document.addEventListener("click", (event) => {
       if (!contextMenu.contains(event.target)) hideContextMenu();
@@ -2683,6 +2973,10 @@
         state.configPath = info.configPath || "";
         state.configWarning = info.configWarning || "";
         state.limits = info.limits || null;
+        state.workers = Number(info.workers) || 0;
+        state.ai = info.ai || null;
+        state.cacheInfo = info.cache || null;
+        state.archiveInfo = info.archive || null;
         state.multiDriveCopyScript = info.multiDriveCopyScript || "";
         state.multiDriveCopyPreset = info.multiDriveCopyPreset || "";
         state.multiDriveCopyAvailable = !!info.multiDriveCopyAvailable;

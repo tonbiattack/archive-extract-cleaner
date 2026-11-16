@@ -13,7 +13,7 @@
         <div class="brand-mark">A</div>
         <div class="brand-text">
           <h1>archive-extract-cleaner</h1>
-          <p>ZIPと解凍済みフォルダの安全な照合</p>
+          <p>ZIP・7z・RARと解凍済みフォルダの安全な照合</p>
         </div>
       </div>
       <div class="top-actions">
@@ -34,6 +34,7 @@
         <button id="addRootBtn" class="btn">追加</button>
         <button id="browseBtn" class="btn">フォルダを選択</button>
         <button id="scanBtn" class="btn primary">スキャン</button>
+        <button id="rescanBtn" class="btn" title="キャッシュを使わずに全件を再検証します">完全再スキャン</button>
         <button id="stopBtn" class="btn danger" disabled>停止</button>
       </div>
     </section>
@@ -55,12 +56,15 @@
       <div id="filterBar" class="filters" role="group" aria-label="判定フィルタ">
         <button class="filter active" data-filter="all">全件</button>
         <button class="filter" data-filter="candidate">削除候補</button>
+        <button class="filter" data-filter="ignorable">補助差分のみ</button>
         <button class="filter" data-filter="mismatch">不一致</button>
         <button class="filter" data-filter="unverified">未検証</button>
         <button class="filter" data-filter="keep">保持</button>
       </div>
       <div class="toolbar-actions">
         <button id="resetColumnsBtn" class="btn">列幅リセット</button>
+        <button id="exportCsvBtn" class="btn">CSV書き出し</button>
+        <button id="exportJsonBtn" class="btn">JSON書き出し</button>
         <button id="transferBtn" class="btn">残ったデータをE/F/Gへコピー</button>
         <button id="selectAllBtn" class="btn">候補を全選択</button>
         <button id="clearSelectionBtn" class="btn">選択解除</button>
@@ -70,6 +74,15 @@
     <section class="summary-bar">
       <div id="summaryChips" class="summary-chips"></div>
       <div id="warningBadge" class="warning-badge hidden" title="走査中の警告"></div>
+    </section>
+
+    <section id="dashboardPanel" class="dashboard hidden" aria-label="容量と削減効果">
+      <div class="dashboard-head">
+        <strong>容量の内訳</strong>
+        <span id="dashboardScope" class="dashboard-scope"></span>
+        <button id="dashboardToggle" class="icon-btn" aria-label="折りたたむ">−</button>
+      </div>
+      <div id="dashboardBody" class="dashboard-body"></div>
     </section>
 
     <section id="workflowBar" class="workflow-bar" aria-label="整理から転送までの作業フロー">
@@ -97,7 +110,7 @@
             <div class="cell check"></div>
             <button class="cell sort" data-sort="verdict">判定<span class="arrow"></span><span class="col-resize" data-col="1" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort" data-sort="name">名前<span class="arrow"></span><span class="col-resize" data-col="2" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
-            <button class="cell sort" data-sort="zip">ZIP<span class="arrow"></span><span class="col-resize" data-col="3" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="zip">アーカイブ<span class="arrow"></span><span class="col-resize" data-col="3" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort" data-sort="folder">解凍済みフォルダ<span class="arrow"></span><span class="col-resize" data-col="4" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort" data-sort="parent">親パス<span class="arrow"></span><span class="col-resize" data-col="5" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort numeric" data-sort="size">サイズ<span class="arrow"></span><span class="col-resize" data-col="6" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
@@ -143,7 +156,7 @@
 
   <div id="contextMenu" class="context-menu hidden" role="menu">
     <button data-copy-field="name" role="menuitem">ファイル名をコピー</button>
-    <button data-copy-field="zipPath" role="menuitem">ZIPのフルパスをコピー</button>
+    <button data-copy-field="zipPath" role="menuitem">アーカイブのフルパスをコピー</button>
     <button data-copy-field="folderPath" role="menuitem">解凍済みフォルダのフルパスをコピー</button>
     <button data-copy-field="parentPath" role="menuitem">親パスをコピー</button>
     <div class="menu-separator"></div>

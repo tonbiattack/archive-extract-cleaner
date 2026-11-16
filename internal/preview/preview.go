@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/archive"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
-	"github.com/tonbiattack/archive-extract-cleaner/internal/ziparchive"
 )
 
 const MaxEntries = 20000
@@ -41,32 +41,29 @@ type Response struct {
 }
 
 func ListZIP(path string, limits model.Limits) ([]Entry, bool, error) {
-	archive, err := ziparchive.Open(path, limits)
+	opened, err := archive.Open(path, limits)
 	if err != nil {
 		return nil, false, err
 	}
-	defer archive.Close()
-	direct := archive.Variants[0]
+	defer opened.Close()
+	// 表示はトップ階層を除去しない direct を使う。
+	direct := opened.Variants()[0]
 	entries := make([]Entry, 0, direct.FileCount+direct.DirCount)
-	for _, display := range direct.DirPaths {
+	for _, dir := range direct.Dirs {
 		entries = append(entries, Entry{
-			Path:  display,
-			Name:  filepath.Base(display),
+			Path:  dir.Path,
+			Name:  filepath.Base(dir.Path),
 			Kind:  "directory",
-			Depth: depth(display),
+			Depth: depth(dir.Path),
 		})
 	}
 	for _, file := range direct.Files {
-		modified := time.Time{}
-		if file.File.Modified != (time.Time{}) {
-			modified = file.File.Modified
-		}
 		entries = append(entries, Entry{
 			Path:     file.Path,
 			Name:     filepath.Base(file.Path),
 			Kind:     "file",
-			Size:     int64(file.File.UncompressedSize64),
-			Modified: modified,
+			Size:     file.Size,
+			Modified: file.ModTime,
 			Depth:    depth(file.Path),
 		})
 	}

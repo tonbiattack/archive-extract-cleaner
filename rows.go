@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/dashboard"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 )
 
@@ -30,6 +31,7 @@ type Row struct {
 	ZipSize     int64     `json:"zipSize"`
 	Reason      string    `json:"reason"`
 	MatchMode   string    `json:"matchMode"`
+	NameVariant bool      `json:"nameVariant"`
 	FileCount   int       `json:"fileCount"`
 	DirCount    int       `json:"dirCount"`
 	ZipEntries  int       `json:"zipEntries"`
@@ -42,37 +44,42 @@ type Row struct {
 }
 
 type RowPage struct {
-	Rows         []Row         `json:"rows"`
-	Total        int           `json:"total"`
-	Offset       int           `json:"offset"`
-	Summary      model.Summary `json:"summary"`
-	Warnings     []string      `json:"warnings"`
-	WarningTotal int           `json:"warningTotal"`
-	Roots        []string      `json:"roots"`
+	Rows         []Row               `json:"rows"`
+	Total        int                 `json:"total"`
+	Offset       int                 `json:"offset"`
+	Summary      model.Summary       `json:"summary"`
+	Dashboard    dashboard.Dashboard `json:"dashboard"`
+	Warnings     []string            `json:"warnings"`
+	WarningTotal int                 `json:"warningTotal"`
+	Roots        []string            `json:"roots"`
 }
 
 func verdictRank(v model.Verdict) int {
 	switch v {
 	case model.VerdictDeleteCandidate:
 		return 0
-	case model.VerdictMismatch:
+	case model.VerdictDeleteCandidateIgnorable:
 		return 1
-	case model.VerdictAmbiguous:
+	case model.VerdictMismatch:
 		return 2
-	case model.VerdictUnverified:
+	case model.VerdictAmbiguous:
 		return 3
-	case model.VerdictKeepArchive:
+	case model.VerdictUnverified:
 		return 4
-	case model.VerdictKeepDirectory:
+	case model.VerdictKeepArchive:
 		return 5
+	case model.VerdictKeepDirectory:
+		return 6
 	}
-	return 6
+	return 7
 }
 
 func matchesFilter(item model.Item, filter string) bool {
 	switch filter {
 	case "candidate":
 		return item.Deletable()
+	case "ignorable":
+		return item.Verdict == model.VerdictDeleteCandidateIgnorable && item.Status != model.StatusDeleted
 	case "mismatch":
 		return item.Verdict == model.VerdictMismatch
 	case "unverified":
@@ -156,6 +163,7 @@ func toRow(item model.Item) Row {
 		ZipSize:     item.ZipSize,
 		Reason:      item.Reason,
 		MatchMode:   string(item.MatchMode),
+		NameVariant: item.NameVariant,
 		FileCount:   item.FileCount,
 		DirCount:    item.DirCount,
 		ZipEntries:  item.ZipEntries,

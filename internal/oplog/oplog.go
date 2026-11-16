@@ -18,8 +18,13 @@ type Entry struct {
 	Verdict       string    `json:"verdict,omitempty"`
 	Success       bool      `json:"success"`
 	Error         string    `json:"error,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
 	MovedTargets  []string  `json:"movedTargets,omitempty"`
 	FailedTargets []string  `json:"failedTargets,omitempty"`
+	// AI推薦の記録。action が ai_suggestion のときだけ設定する。
+	Decision   string  `json:"decision,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	EvidenceID string  `json:"evidenceId,omitempty"`
 }
 
 type Logger struct {

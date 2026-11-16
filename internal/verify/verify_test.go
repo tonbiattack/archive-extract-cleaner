@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/cache"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/testutil"
 )
@@ -251,3 +252,198 @@ func TestVerifyRejectsJunction(t *testing.T) {
 		t.Fatalf("verdict = %s: %s", result.Verdict, result.Reason)
 	}
 }
+
+func TestVerifyIgnoresMacOSXArtifacts(t *testing.T) {
+	f := newFixture(t,
+		[]testutil.Entry{
+			{Name: "photos/a.txt", Content: "alpha"},
+			{Name: "photos/__MACOSX/._a.txt", Content: "resource-fork"},
+			{Name: "photos/.DS_Store", Content: "mac-metadata"},
+		},
+		map[string]string{"a.txt": "alpha"})
+	result := f.verify(t, Options{})
+	if result.Verdict != model.VerdictDeleteCandidateIgnorable {
+		t.Fatalf("verdict = %s: %s %v", result.Verdict, result.Reason, result.Details)
+	}
+	if result.ComparedBytes == 0 {
+		t.Fatal("common files were not compared")
+	}
+}
+
+func TestVerifyIgnoresThumbsDbAndDesktopIni(t *testing.T) {
+	f := newFixture(t,
+		[]testutil.Entry{
+			{Name: "a.txt", Content: "alpha"},
+			{Name: "sub/Thumbs.db", Content: "thumb"},
+			{Name: "desktop.ini", Content: "ini"},
+		},
+		map[string]string{"a.txt": "alpha", "sub/.keep": ""})
+	// フォルダ側に sub ディレクトリがあり、ZIP側にだけ Thumbs.db がある形。
+	if err := testutil.WriteFile(f.folder, "sub/.keep", ""); err != nil {
+		t.Fatal(err)
+	}
+	result := f.verify(t, Options{})
+	if result.Verdict != model.VerdictMismatch && result.Verdict != model.VerdictDeleteCandidateIgnorable {
+		t.Fatalf("verdict = %s: %s %v", result.Verdict, result.Reason, result.Details)
+	}
+	if result.Verdict == model.VerdictDeleteCandidateIgnorable && result.ComparedBytes == 0 {
+		t.Fatal("common files were not compared")
+	}
+}
+
+func TestVerifyIgnoresOnlyZipSideArtifacts(t *testing.T) {
+	// フォルダ側にしかない補助ファイルは削除対象にしない。
+	f := newFixture(t,
+		[]testutil.Entry{{Name: "a.txt", Content: "alpha"}},
+		map[string]string{"a.txt": "alpha", ".DS_Store": "mac-metadata"})
+	result := f.verify(t, Options{})
+	if result.Verdict != model.VerdictMismatch {
+		t.Fatalf("verdict = %s: %s", result.Verdict, result.Reason)
+	}
+}
+
+func TestVerifyArtifactWithChangedContentIsMismatch(t *testing.T) {
+	// 補助ファイル以外の内容が違えば、補助差分として扱わない。
+	f := newFixture(t,
+		[]testutil.Entry{
+			{Name: "a.txt", Content: "alpha"},
+			{Name: ".DS_Store", Content: "mac-metadata"},
+		},
+		map[string]string{"a.txt": "changed"})
+	result := f.verify(t, Options{})
+	if result.Verdict != model.VerdictMismatch {
+		t.Fatalf("verdict = %s: %s %v", result.Verdict, result.Reason, result.Details)
+	}
+}
+
+func TestShouldIgnoreZipOnly(t *testing.T) {
+	ignored := []string{
+		".DS_Store",
+		"sub/Thumbs.db",
+		"desktop.ini",
+		"__MACOSX/._a.jpg",
+		"a/b/._resource",
+		".Spotlight-V100/store.db",
+		"download.crdownload",
+		"file.tmp",
+		"partial.part",
+	}
+	for _, path := range ignored {
+		if !shouldIgnoreZipOnly(path) {
+			t.Errorf("%q should be ignored", path)
+		}
+	}
+	kept := []string{
+		"a.txt",
+		"photos/image.jpg",
+		"notes.txt",
+		"image.png",
+		"archive/TEMP",
+	}
+	for _, path := range kept {
+		if shouldIgnoreZipOnly(path) {
+			t.Errorf("%q should not be ignored", path)
+		}
+	}
+}
+
+// countingCache はテスト用のハッシュキャッシュ。
+type countingCache struct {
+	records map[string]cache.ArchiveRecord
+	lookups int
+	puts    int
+}
+
+func (c *countingCache) Lookup(key cache.ArchiveKey) (cache.ArchiveRecord, bool) {
+	c.lookups++
+	record, ok := c.records[filepath.Clean(key.Path)]
+	if !ok {
+		return cache.ArchiveRecord{}, false
+	}
+	if record.Key != key {
+		return cache.ArchiveRecord{}, false
+	}
+	return record, true
+}
+
+func (c *countingCache) Put(record cache.ArchiveRecord) {
+	c.puts++
+	if c.records == nil {
+		c.records = map[string]cache.ArchiveRecord{}
+	}
+	c.records[filepath.Clean(record.Key.Path)] = record
+}
+
+func TestVerifyWithCacheMatchesWithoutCache(t *testing.T) {
+	f := newFixture(t,
+		[]testutil.Entry{{Name: "a.txt", Content: "alpha"}, {Name: "sub/b.txt", Content: "beta"}},
+		map[string]string{"a.txt": "alpha", "sub/b.txt": "beta"})
+
+	plain := f.verify(t, Options{})
+	cache := &countingCache{}
+	first := f.verify(t, Options{Hashes: cache})
+	second := f.verify(t, Options{Hashes: cache})
+
+	if plain.Verdict != first.Verdict || plain.Verdict != second.Verdict {
+		t.Fatalf("verdicts plain=%s first=%s second=%s", plain.Verdict, first.Verdict, second.Verdict)
+	}
+	if first.ComputedHashes == 0 {
+		t.Fatal("first run should compute hashes")
+	}
+	if second.CachedHashes == 0 {
+		t.Fatal("second run should use cached hashes")
+	}
+	if second.ComputedHashes != 0 {
+		t.Fatalf("second run should not compute: %+v", second)
+	}
+	if cache.puts == 0 {
+		t.Fatal("hashes should be stored")
+	}
+}
+
+func TestVerifyCacheDoesNotMaskContentChange(t *testing.T) {
+	f := newFixture(t,
+		[]testutil.Entry{{Name: "a.txt", Content: "alpha"}},
+		map[string]string{"a.txt": "alpha"})
+	cache := &countingCache{}
+	if got := f.verify(t, Options{Hashes: cache}); got.Verdict != model.VerdictDeleteCandidate {
+		t.Fatalf("verdict = %s", got.Verdict)
+	}
+
+	// ZIP の中身を差し替える。構造指紋が変わるのでキャッシュは無効になる。
+	if err := testutil.WriteZip(f.zip, []testutil.Entry{{Name: "a.txt", Content: "bravo"}}); err != nil {
+		t.Fatal(err)
+	}
+	changed := f.verify(t, Options{Hashes: cache})
+	if changed.Verdict == model.VerdictDeleteCandidate {
+		t.Fatal("changed ZIP content must not stay a delete candidate")
+	}
+}
+
+func TestVerifyCacheIgnoresCorruptedDigest(t *testing.T) {
+	f := newFixture(t,
+		[]testutil.Entry{{Name: "a.txt", Content: "alpha"}},
+		map[string]string{"a.txt": "alpha"})
+	broken := &brokenDigestCache{}
+	result := f.verify(t, Options{Hashes: broken})
+	// 壊れたキャッシュは使わず、実計算で正しい判定になる。
+	if result.Verdict != model.VerdictDeleteCandidate {
+		t.Fatalf("verdict = %s: %s", result.Verdict, result.Reason)
+	}
+	if result.ComputedHashes == 0 {
+		t.Fatal("should fall back to computing hashes")
+	}
+}
+
+type brokenDigestCache struct{}
+
+func (brokenDigestCache) Lookup(key cache.ArchiveKey) (cache.ArchiveRecord, bool) {
+	return cache.ArchiveRecord{
+		Key: key,
+		Entries: []cache.ArchiveEntry{
+			{Path: "a.txt", SHA256: "not-hex", Size: 5, CRC32: 0},
+		},
+	}, true
+}
+
+func (brokenDigestCache) Put(cache.ArchiveRecord) {}

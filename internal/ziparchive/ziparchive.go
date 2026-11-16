@@ -2,9 +2,13 @@ package ziparchive
 
 import (
 	"archive/zip"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,6 +49,39 @@ type Archive struct {
 	EntryCount        int
 	TotalUncompressed uint64
 	TotalCompressed   uint64
+	// structureHash はセントラルディレクトリから読めるエントリ属性のハッシュ。
+	// キャッシュの妥当性確認に使い、圧縮データ本体は読まない。
+	structureHash string
+}
+
+// StructureHash はエントリ名・圧縮方式・CRC32・サイズから作る指紋を返す。
+// 同じサイズ・更新時刻のまま中身だけ差し替えられたアーカイブを検出するために使う。
+func (a *Archive) StructureHash() string {
+	if a == nil {
+		return ""
+	}
+	return a.structureHash
+}
+
+// computeStructureHash はセントラルディレクトリの属性を正規化してハッシュ化する。
+func computeStructureHash(files []*zip.File) string {
+	entries := make([]string, 0, len(files))
+	for _, zf := range files {
+		entries = append(entries, fmt.Sprintf("%s\x00%d\x00%d\x00%d\x00%d",
+			zf.Name,
+			zf.Method,
+			zf.CRC32,
+			zf.CompressedSize64,
+			zf.UncompressedSize64,
+		))
+	}
+	sort.Strings(entries)
+	hash := sha256.New()
+	for _, entry := range entries {
+		io.WriteString(hash, entry)
+		hash.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func (a *Archive) Close() error {
@@ -170,6 +207,7 @@ func Open(path string, limits model.Limits) (*Archive, error) {
 	}
 
 	a.EntryCount = len(reader.File)
+	a.structureHash = computeStructureHash(reader.File)
 	ok = true
 	return a, nil
 }

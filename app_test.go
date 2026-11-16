@@ -496,3 +496,109 @@ func TestFilterAndSortRows(t *testing.T) {
 		t.Fatalf("verdict sort = %+v", items)
 	}
 }
+
+func TestSuggestForItemRefusesDeletableCandidate(t *testing.T) {
+	root := t.TempDir()
+	if err := testutil.WriteZip(filepath.Join(root, "photos.zip"), []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(filepath.Join(root, "photos"), "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
+	if len(ids) != 1 {
+		t.Fatalf("candidates = %v", ids)
+	}
+	if _, err := app.SuggestForItem(ids[0]); err == nil {
+		t.Fatal("AI must not be asked about an already-decided candidate")
+	}
+}
+
+func TestSuggestForItemRefusesUnverified(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.zip"), []byte("broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(filepath.Join(root, "broken"), "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	rows := app.GetRows(RowQuery{Filter: "unverified"})
+	if len(rows.Rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if _, err := app.SuggestForItem(rows.Rows[0].ID); err == nil {
+		t.Fatal("UNVERIFIED items must not be sent to AI")
+	}
+}
+
+func TestSuggestForItemDisabledByDefault(t *testing.T) {
+	root := t.TempDir()
+	if err := testutil.WriteZip(filepath.Join(root, "photos.zip"), []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(filepath.Join(root, "photos"), "a.txt", "changed"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	rows := app.GetRows(RowQuery{Filter: "mismatch"})
+	if len(rows.Rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	info, err := app.SuggestForItem(rows.Rows[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Error == "" {
+		t.Fatal("disabled AI should report that it is disabled")
+	}
+	// AIの提案があっても削除候補にはならない。
+	if len(app.CandidateIDs(RowQuery{Filter: "candidate"})) != 0 {
+		t.Fatal("AI suggestion must not create delete candidates")
+	}
+}
+
+func TestAISuggestionDoesNotEnableDeletion(t *testing.T) {
+	root := t.TempDir()
+	if err := testutil.WriteZip(filepath.Join(root, "photos.zip"), []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.WriteFile(filepath.Join(root, "photos"), "a.txt", "changed"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	rows := app.GetRows(RowQuery{Filter: "mismatch"})
+	if len(rows.Rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	id := rows.Rows[0].ID
+	app.suggestions.set(id, SuggestionInfo{ID: id, Decision: "delete_folder", Confidence: 0.99})
+
+	detail, err := app.GetItemDetail(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Deletable() {
+		t.Fatal("AI suggestion must not make an item deletable")
+	}
+	options := app.GetMoveOptions([]string{id})
+	if len(options) != 1 {
+		t.Fatalf("options = %+v", options)
+	}
+	if options[0].CanFolder || options[0].CanZip || options[0].CanBoth {
+		t.Fatalf("AI suggestion must not allow moves: %+v", options[0])
+	}
+}

@@ -12,7 +12,11 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/advisor"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/archive"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/cache"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/config"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/dashboard"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/engine"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
@@ -40,6 +44,7 @@ type App struct {
 	log                  *oplog.Logger
 	logPath              string
 	limits               model.Limits
+	workers              int
 	configPath           string
 	configWarning        string
 	mover                removal.Mover
@@ -47,14 +52,24 @@ type App struct {
 	multiDriveCopyPreset string
 	previewMu            sync.Mutex
 	previewCache         map[string]cachedPreview
+	advisor              advisor.Advisor
+	aiEnabled            bool
+	aiModel              string
+	aiKeyEnv             string
+	suggestions          *aiSuggestionStore
+	archiveHashes        *cache.ArchiveHashes
+	scanStore            *cache.ScanStore
+	lastCacheStats       engine.CacheStats
+	moves                dashboard.Moves
 }
 
 type ScanInfo struct {
-	Summary      model.Summary `json:"summary"`
-	Warnings     []string      `json:"warnings"`
-	WarningTotal int           `json:"warningTotal"`
-	Roots        []string      `json:"roots"`
-	Cancelled    bool          `json:"cancelled"`
+	Summary      model.Summary     `json:"summary"`
+	Warnings     []string          `json:"warnings"`
+	WarningTotal int               `json:"warningTotal"`
+	Roots        []string          `json:"roots"`
+	Cancelled    bool              `json:"cancelled"`
+	Cache        engine.CacheStats `json:"cache"`
 }
 
 type AppState struct {
@@ -68,10 +83,40 @@ type AppState struct {
 	ConfigPath              string        `json:"configPath"`
 	ConfigWarning           string        `json:"configWarning"`
 	Limits                  model.Limits  `json:"limits"`
+	Workers                 int           `json:"workers"`
 	MultiDriveCopyScript    string        `json:"multiDriveCopyScript"`
 	MultiDriveCopyPreset    string        `json:"multiDriveCopyPreset"`
 	MultiDriveCopyAvailable bool          `json:"multiDriveCopyAvailable"`
+	AI                      AIState       `json:"ai"`
+	Cache                   CacheState    `json:"cache"`
+	Archive                 ArchiveState  `json:"archive"`
 	Version                 string        `json:"version"`
+}
+
+// ArchiveState はアーカイブ読み取りの対応状況。
+type ArchiveState struct {
+	// Formats は対応する拡張子。
+	Formats []string `json:"formats"`
+	// ToolPath は検出した 7z.exe。空なら未検出。
+	ToolPath string `json:"toolPath"`
+	// ToolAvailable は 7z / RAR を読めるか。
+	ToolAvailable bool `json:"toolAvailable"`
+	// ToolRequired は 7z / RAR の読み取りに外部ツールが必要か。
+	ToolRequired bool `json:"toolRequired"`
+}
+
+// CacheState はキャッシュの状態。UI とテストで利用する。
+type CacheState struct {
+	// Enabled はキャッシュが有効か。
+	Enabled bool `json:"enabled"`
+	// HashPath / ScanPath はキャッシュファイルの場所。
+	HashPath string `json:"hashPath"`
+	ScanPath string `json:"scanPath"`
+	// Archives / Roots は保持している件数。
+	Archives int `json:"archives"`
+	Roots    int `json:"roots"`
+	// LastScan は直近のスキャンでのキャッシュ利用状況。
+	LastScan engine.CacheStats `json:"lastScan"`
 }
 
 type DeleteProgress struct {
@@ -84,6 +129,8 @@ type DeleteProgress struct {
 func NewApp() *App {
 	logger := oplog.New("")
 	cfg, configPath, configErr := config.Load("")
+	// 7-Zip の場所は起動時に一度だけ設定する（差分スキャンやプレビューでも使う）。
+	archive.ConfigureTool(cfg.ArchiveTool)
 	scriptPath := cfg.MultiDriveCopy.ScriptPath
 	if scriptPath == "" {
 		scriptPath = transfer.DefaultScriptPath()
@@ -95,11 +142,19 @@ func NewApp() *App {
 		log:                  logger,
 		logPath:              logger.Path(),
 		limits:               cfg.Limits,
+		workers:              cfg.Workers,
 		configPath:           configPath,
 		mover:                removal.MoveToRecycleBin,
 		multiDriveCopyScript: scriptPath,
 		multiDriveCopyPreset: cfg.MultiDriveCopy.Preset,
 		previewCache:         map[string]cachedPreview{},
+		advisor:              aiConfigured(cfg.AI.Enabled, cfg.AI.Endpoint, cfg.AI.Model, cfg.AI.APIKeyEnv, cfg.AI.AllowInsecure),
+		aiEnabled:            cfg.AI.Enabled,
+		aiModel:              cfg.AI.Model,
+		aiKeyEnv:             cfg.AI.APIKeyEnv,
+		suggestions:          &aiSuggestionStore{},
+		archiveHashes:        cache.NewArchiveHashes(cache.DefaultHashesPath()),
+		scanStore:            cache.NewScanStore(cache.DefaultScanPath()),
 	}
 	if configErr != nil {
 		app.configWarning = "設定ファイルを読み込めないため既定値を使用します: " + configErr.Error()
@@ -139,10 +194,53 @@ func (a *App) GetState() AppState {
 		ConfigPath:              a.configPath,
 		ConfigWarning:           a.configWarning,
 		Limits:                  a.limits,
+		Workers:                 a.workers,
 		MultiDriveCopyScript:    a.multiDriveCopyScript,
 		MultiDriveCopyPreset:    a.multiDriveCopyPreset,
 		MultiDriveCopyAvailable: transfer.ScriptAvailable(a.multiDriveCopyScript),
+		AI:                      a.aiStateLocked(),
+		Cache:                   a.cacheStateLocked(),
+		Archive:                 archiveState(),
 		Version:                 appVersion,
+	}
+}
+
+// archiveState はアーカイブ対応状況を返す。
+func archiveState() ArchiveState {
+	return ArchiveState{
+		Formats:       []string{".zip", ".7z", ".rar"},
+		ToolPath:      archive.ToolPath(),
+		ToolAvailable: archive.ToolAvailable(),
+		ToolRequired:  true,
+	}
+}
+
+// cacheStateLocked は a.mu を保持したままキャッシュ状態を組み立てる。
+func (a *App) cacheStateLocked() CacheState {
+	state := CacheState{LastScan: a.lastCacheStats}
+	if a.archiveHashes != nil {
+		state.Enabled = true
+		state.HashPath = a.archiveHashes.Path()
+		state.Archives = a.archiveHashes.Len()
+	}
+	if a.scanStore != nil {
+		state.Enabled = true
+		state.ScanPath = a.scanStore.Path()
+		state.Roots = a.scanStore.Len()
+	}
+	return state
+}
+
+// aiStateLocked は a.mu を保持したまま AI 状態を組み立てる。
+func (a *App) aiStateLocked() AIState {
+	available := a.advisor != nil && a.advisor.Enabled()
+	return AIState{
+		Enabled:      a.aiEnabled,
+		Model:        a.aiModel,
+		Available:    available,
+		KeyEnv:       a.aiKeyEnv,
+		KeyPresent:   available,
+		PendingCount: len(a.suggestions.all()),
 	}
 }
 
@@ -206,6 +304,15 @@ func (a *App) LaunchMultiDriveCopy(paths []string) (transfer.LaunchResult, error
 }
 
 func (a *App) Scan(roots []string) (ScanInfo, error) {
+	return a.scan(roots, false)
+}
+
+// Rescan はキャッシュを使わずに完全再スキャンする。
+func (a *App) Rescan(roots []string) (ScanInfo, error) {
+	return a.scan(roots, true)
+}
+
+func (a *App) scan(roots []string, full bool) (ScanInfo, error) {
 	a.mu.Lock()
 	if a.scanning || a.deleting {
 		a.mu.Unlock()
@@ -219,6 +326,9 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 	a.cancelScan = cancel
 	a.scanning = true
 	limits := a.limits
+	workers := a.workers
+	hashes := a.archiveHashes
+	scans := a.scanStore
 	a.mu.Unlock()
 
 	defer func() {
@@ -230,19 +340,38 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 	}()
 
 	lastEmit := time.Time{}
+	var progressMu sync.Mutex
 	progress := func(p model.Progress) {
+		progressMu.Lock()
 		if p.Phase != model.PhaseDone && time.Since(lastEmit) < 80*time.Millisecond {
+			progressMu.Unlock()
 			return
 		}
 		lastEmit = time.Now()
+		progressMu.Unlock()
 		a.emit("scan:progress", p)
+	}
+
+	// 前回結果はルートごとに保持している。差分スキャンはルート単位で有効にする。
+	previous := (*cache.RootRecord)(nil)
+	if !full && scans != nil {
+		roots = normalizeRoots(roots)
+		if len(roots) == 1 {
+			if record, ok := scans.Lookup(roots[0], true, cache.ArchiveEpoch()); ok {
+				previous = &record
+			}
+		}
 	}
 
 	result, err := engine.Scan(ctx, engine.Options{
 		Roots:     roots,
 		Recursive: true,
 		Limits:    limits,
+		Workers:   workers,
 		Progress:  progress,
+		Hashes:    hashes,
+		Previous:  previous,
+		Full:      full,
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -252,6 +381,19 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 		}
 		a.emit("scan:error", err.Error())
 		return ScanInfo{}, err
+	}
+
+	// 次回の差分スキャンのため、結果をルート単位で保存する。
+	if scans != nil && len(result.Roots) == 1 {
+		scans.Put(cache.NewRootRecord(result.Roots[0], true, result.Records, result.Summary.ScannedAt))
+		if err := scans.Flush(); err != nil {
+			a.emit("scan:cache_error", err.Error())
+		}
+	}
+	if hashes != nil {
+		if err := hashes.Flush(); err != nil {
+			a.emit("scan:cache_error", err.Error())
+		}
 	}
 
 	index := make(map[string]int, len(result.Items))
@@ -265,6 +407,7 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 	a.summary = result.Summary
 	a.warnings = result.Warnings
 	a.warningTotal = result.WarningTotal
+	a.lastCacheStats = result.Cache
 	a.mu.Unlock()
 	a.clearPreviewCache()
 
@@ -273,9 +416,29 @@ func (a *App) Scan(roots []string) (ScanInfo, error) {
 		Warnings:     result.Warnings,
 		WarningTotal: result.WarningTotal,
 		Roots:        result.Roots,
+		Cache:        result.Cache,
 	}
 	a.emit("scan:done", info)
 	return info, nil
+}
+
+// normalizeRoots はルートの重複と表記ゆれをならす。キャッシュ引き当ての前に使う。
+func normalizeRoots(roots []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(roots))
+	for _, root := range roots {
+		abs, err := winpath.CleanAbs(root)
+		if err != nil {
+			continue
+		}
+		key := winpath.Key(abs)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, abs)
+	}
+	return result
 }
 
 func (a *App) CancelScan() {
@@ -294,6 +457,7 @@ func (a *App) GetRows(query RowQuery) RowPage {
 	warnings := append([]string(nil), a.warnings...)
 	warningTotal := a.warningTotal
 	roots := append([]string(nil), a.roots...)
+	moves := a.moves
 	a.mu.RUnlock()
 
 	filtered := filterItems(items, query)
@@ -322,11 +486,14 @@ func (a *App) GetRows(query RowQuery) RowPage {
 	for _, item := range filtered[offset:end] {
 		rows = append(rows, toRow(item))
 	}
+	// ダッシュボードはスキャン全体の値。一覧の絞り込みとは独立させる。
+	filteredView := len(filtered) != len(items)
 	return RowPage{
 		Rows:         rows,
 		Total:        total,
 		Offset:       offset,
 		Summary:      summary,
+		Dashboard:    dashboard.Build(items, moves, filteredView, len(filtered)),
 		Warnings:     warnings,
 		WarningTotal: warningTotal,
 		Roots:        roots,

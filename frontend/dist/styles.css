@@ -453,6 +453,84 @@ input {
   align-items: center;
 }
 
+/* Dashboard */
+.dashboard {
+  flex: 0 0 auto;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.dashboard-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dashboard-scope {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.dashboard-head .icon-btn {
+  margin-left: auto;
+}
+
+.dashboard-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 0 18px 10px;
+}
+
+.dashboard.collapsed .dashboard-body {
+  display: none;
+}
+
+.dash-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-alt);
+  padding: 8px 10px;
+}
+
+.dash-card.reclaim {
+  border-color: rgba(45, 138, 86, 0.35);
+  background: var(--green-soft);
+}
+
+.dash-card.excluded {
+  opacity: 0.85;
+}
+
+.dash-label {
+  font-size: 11px;
+  color: var(--muted);
+  display: block;
+}
+
+.dash-value {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.dash-note {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 2px;
+}
+
 .chip {
   display: inline-flex;
   align-items: baseline;
@@ -852,6 +930,12 @@ input[type="checkbox"]:disabled {
   background: var(--green-soft);
 }
 
+.badge.v-DELETE_CANDIDATE_IGNORABLE {
+  color: var(--green);
+  background: #eaf6ee;
+  box-shadow: inset 0 0 0 1px rgba(45, 138, 86, 0.35);
+}
+
 .badge.v-MISMATCH {
   color: var(--orange);
   background: var(--orange-soft);
@@ -876,6 +960,11 @@ input[type="checkbox"]:disabled {
 .badge.badge-deleted {
   color: var(--green);
   background: #dcefe4;
+}
+
+.badge.badge-variant {
+  color: var(--purple);
+  background: var(--purple-soft);
 }
 
 /* Detail pane */

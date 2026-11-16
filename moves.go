@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tonbiattack/archive-extract-cleaner/internal/dashboard"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/removal"
@@ -94,12 +95,13 @@ type MoveResult struct {
 }
 
 type MoveResponse struct {
-	Results   []MoveResult  `json:"results"`
-	Summary   model.Summary `json:"summary"`
-	Succeeded int           `json:"succeeded"`
-	Partial   int           `json:"partial"`
-	Failed    int           `json:"failed"`
-	Skipped   int           `json:"skipped"`
+	Results   []MoveResult    `json:"results"`
+	Summary   model.Summary   `json:"summary"`
+	Succeeded int             `json:"succeeded"`
+	Partial   int             `json:"partial"`
+	Failed    int             `json:"failed"`
+	Skipped   int             `json:"skipped"`
+	Moves     dashboard.Moves `json:"moves"`
 }
 
 func (a *App) GetMoveOptions(ids []string) []MoveOption {
@@ -201,6 +203,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 	results := make([]MoveResult, 0, len(requests))
 	updates := map[string]model.Item{}
 	succeeded, partial, failed, skipped := 0, 0, 0, 0
+	moves := dashboard.Moves{}
 
 	for position, request := range requests {
 		if _, ok := seen[request.ID]; ok {
@@ -210,6 +213,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		indexInItems, ok := index[request.ID]
 		if !ok {
 			skipped++
+			moves.AddMoveResult(dashboard.MoveOutcome{Skipped: true})
 			results = append(results, MoveResult{ID: request.ID, Method: request.Method, Skipped: true, Reason: "項目が見つかりません", LogPath: a.logPath})
 			continue
 		}
@@ -219,6 +223,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		targets, allowed := moveTargetsForMethod(option, request.Method)
 		if !allowed || len(targets) == 0 {
 			skipped++
+			moves.AddMoveResult(dashboard.MoveOutcome{Skipped: true, Bytes: item.Size})
 			results = append(results, MoveResult{
 				ID: item.ID, Name: item.DisplayName(), Method: request.Method, Skipped: true,
 				Reason: "選択した移動方法を利用できません", LogPath: a.logPath,
@@ -228,8 +233,10 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		}
 
 		if !item.ZipMoved && !item.FolderMoved {
+			// 移動直前の再照合ではキャッシュを渡さない。
+			// スキャン結果がキャッシュ由来でも、削除の根拠は必ず実体の再計算にする。
 			verification := verify.Verify(base, item.ZipPath, item.FolderPath, verify.Options{Limits: limits, Roots: roots})
-			if verification.Verdict != model.VerdictDeleteCandidate {
+			if !verification.Verdict.IsDeleteCandidate() {
 				item.Verdict = verification.Verdict
 				item.Status = model.StatusError
 				item.Reason = "再検証に失敗しました: " + verification.Reason
@@ -238,6 +245,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 				item.CheckedAt = time.Now()
 				updates[request.ID] = item
 				skipped++
+				moves.AddMoveResult(dashboard.MoveOutcome{Skipped: true, Bytes: item.Size})
 				results = append(results, MoveResult{
 					ID: item.ID, Name: item.DisplayName(), Method: request.Method, Skipped: true,
 					Reason: item.Reason, LogPath: a.logPath,
@@ -280,6 +288,15 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 			}
 		}
 
+		// ダッシュボード用に、対象サイズと実際に移せたサイズを記録する。
+		requestedBytes := targetsBytes(targets)
+		movedBytes := int64(0)
+		for index, targetResult := range targetResults {
+			if targetResult.Success {
+				movedBytes += targets[index].Size
+			}
+		}
+
 		switch {
 		case allSuccess:
 			item.DeleteError = ""
@@ -304,6 +321,11 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 				item.Size = item.FolderSize
 			}
 			succeeded++
+			moves.AddMoveResult(dashboard.MoveOutcome{
+				Success:    true,
+				Bytes:      requestedBytes,
+				MovedBytes: movedBytes,
+			})
 			results = append(results, MoveResult{
 				ID: item.ID, Name: item.DisplayName(), Method: request.Method, Success: true,
 				Reason: item.Reason, Targets: targetResults, MovedAt: now, LogPath: a.logPath,
@@ -316,6 +338,11 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 			item.Reason = "一部の対象をごみ箱に移動できませんでした: " + item.DeleteError
 			item.Size = remainingSize(item)
 			partial++
+			moves.AddMoveResult(dashboard.MoveOutcome{
+				Partial:    true,
+				Bytes:      requestedBytes,
+				MovedBytes: movedBytes,
+			})
 			results = append(results, MoveResult{
 				ID: item.ID, Name: item.DisplayName(), Method: request.Method, Partial: true,
 				Reason: item.Reason, Targets: targetResults, MovedAt: now, LogPath: a.logPath,
@@ -327,6 +354,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 			item.Reason = "ごみ箱への移動に失敗しました: " + item.DeleteError
 			item.Size = remainingSize(item)
 			failed++
+			moves.AddMoveResult(dashboard.MoveOutcome{Bytes: requestedBytes})
 			results = append(results, MoveResult{
 				ID: item.ID, Name: item.DisplayName(), Method: request.Method,
 				Reason: item.Reason, Targets: targetResults, MovedAt: now, LogPath: a.logPath,
@@ -348,12 +376,38 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 	summary.ScannedAt = old.ScannedAt
 	summary.DurationMS = old.DurationMS
 	a.summary = summary
+	// 移動集計は累積する。複数回に分けて移動しても合計が増えていく。
+	merged := a.moves
+	merged.Succeeded.Add(moves.Succeeded.Count, moves.Succeeded.Bytes)
+	merged.Partial.Add(moves.Partial.Count, moves.Partial.Bytes)
+	merged.Failed.Add(moves.Failed.Count, moves.Failed.Bytes)
+	merged.Skipped.Add(moves.Skipped.Count, moves.Skipped.Bytes)
+	merged.MovedBytes += moves.MovedBytes
+	merged.AllSucceeded = merged.Failed.Count == 0 && merged.Partial.Count == 0
+	a.moves = merged
 	a.mu.Unlock()
 	a.clearPreviewCache()
 
-	response := MoveResponse{Results: results, Summary: summary, Succeeded: succeeded, Partial: partial, Failed: failed, Skipped: skipped}
+	response := MoveResponse{
+		Results:   results,
+		Summary:   summary,
+		Succeeded: succeeded,
+		Partial:   partial,
+		Failed:    failed,
+		Skipped:   skipped,
+		Moves:     merged,
+	}
 	a.emit("delete:done", response)
 	return response, nil
+}
+
+// targetsBytes は移動対象の合計サイズを返す。
+func targetsBytes(targets []MoveTargetOption) int64 {
+	var total int64
+	for _, target := range targets {
+		total += target.Size
+	}
+	return total
 }
 
 func buildMoveOption(item model.Item) MoveOption {
@@ -385,13 +439,16 @@ func buildMoveOption(item model.Item) MoveOption {
 		})
 	}
 
-	eligible := item.Verdict == model.VerdictDeleteCandidate && item.Status != model.StatusDeleted
+	eligible := item.Verdict.IsDeleteCandidate() && item.Status != model.StatusDeleted
 	if eligible {
 		if !item.ZipMoved && !item.FolderMoved {
 			if option.ZipExists && option.FolderExists {
 				option.CanFolder = true
 				option.CanZip = true
 				option.CanBoth = true
+				if item.Verdict == model.VerdictDeleteCandidateIgnorable {
+					option.Warning = "ZIPにのみ補助ファイル（__MACOSX/.DS_Store など）が含まれます。解凍済みフォルダには含まれません。"
+				}
 			} else {
 				option.Warning = "ZIPとフォルダの両方を確認できないため再スキャンしてください。"
 			}
@@ -410,7 +467,11 @@ func buildMoveOption(item model.Item) MoveOption {
 		option.DefaultMethod = MoveMethodZip
 	}
 	if option.CanBoth {
-		option.Warning = "ZIPとフォルダの両方を移動すると、最後のローカルコピーを失う可能性があります。転送は行われません。"
+		bothWarning := "ZIPとフォルダの両方を移動すると、最後のローカルコピーを失う可能性があります。転送は行われません。"
+		if item.Verdict == model.VerdictDeleteCandidateIgnorable {
+			bothWarning = "ZIPにのみ補助ファイルが含まれます。" + bothWarning
+		}
+		option.Warning = bothWarning
 		if item.Status == model.StatusError {
 			option.Warning = "前回の移動に失敗しています。" + option.Warning
 		}

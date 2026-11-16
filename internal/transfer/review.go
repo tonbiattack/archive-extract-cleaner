@@ -98,7 +98,7 @@ func addItem(builder *reviewBuilder, item model.Item) {
 		item.Verdict == model.VerdictAmbiguous
 
 	switch item.Verdict {
-	case model.VerdictDeleteCandidate:
+	case model.VerdictDeleteCandidate, model.VerdictDeleteCandidateIgnorable:
 		if !item.ZipMoved {
 			addCandidate(builder, item, item.ZipPath, "zip", needsReview)
 		}

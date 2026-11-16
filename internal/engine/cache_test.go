@@ -94,7 +94,13 @@ func TestCachedScanDetectsCorruptArchiveWithUnchangedMetadata(t *testing.T) {
 	}
 }
 
-func TestDifferentialScanReusesUnchangedItems(t *testing.T) {
+// TestDifferentialScanDoesNotReuseVerdicts は、判定の再利用を停止していることを固定する。
+//
+// フォルダ指紋は相対パス・サイズ・更新時刻から作るため、同じサイズ・同じ
+// 更新時刻のまま中身だけ差し替えたフォルダを検出できない。判定を再利用すると
+// 内容が違うフォルダが DELETE_CANDIDATE のまま残り、誤削除につながる。
+// 再利用を再開するときは、このテストが示す攻撃を防げる条件を先に設計すること。
+func TestDifferentialScanDoesNotReuseVerdicts(t *testing.T) {
 	root := t.TempDir()
 	manyPairs(t, root, 5)
 
@@ -103,6 +109,31 @@ func TestDifferentialScanReusesUnchangedItems(t *testing.T) {
 	if first.Cache.ReusedItems != 0 {
 		t.Fatalf("first scan must verify everything: %+v", first.Cache)
 	}
+
+	previous := recordFor(t, first, root)
+	second := scanWithCache(t, root, previous, hashes, false)
+
+	if second.Cache.ReusedItems != 0 {
+		t.Fatalf("verdict reuse must stay disabled: %+v", second.Cache)
+	}
+	if second.Summary.CandidateCount != first.Summary.CandidateCount {
+		t.Fatalf("candidates first=%d second=%d", first.Summary.CandidateCount, second.Summary.CandidateCount)
+	}
+}
+
+// TestDifferentialScanDoesNotReuseArchiveHashes は、ZIP ハッシュの再利用を
+// 停止していることを固定する。
+//
+// キャッシュのキーはセントラルディレクトリの構造指紋（CRC32 を含む）だが、
+// CRC32 は圧縮データの破損を検出できない。破損した ZIP はセントラル
+// ディレクトリが無傷のまま残るため指紋が一致し、破損 ZIP を「一致」と
+// 誤表示する。展開を省くと破損を検出できないため、ハッシュは再利用しない。
+func TestDifferentialScanDoesNotReuseArchiveHashes(t *testing.T) {
+	root := t.TempDir()
+	manyPairs(t, root, 5)
+
+	hashes := cache.NewArchiveHashes(filepath.Join(t.TempDir(), "hashes.json"))
+	first := scanWithCache(t, root, nil, hashes, false)
 	if first.Cache.ComputedHashes == 0 {
 		t.Fatal("first scan should compute ZIP hashes")
 	}
@@ -110,14 +141,11 @@ func TestDifferentialScanReusesUnchangedItems(t *testing.T) {
 	previous := recordFor(t, first, root)
 	second := scanWithCache(t, root, previous, hashes, false)
 
-	if second.Cache.ReusedItems != 0 || second.Cache.CachedHashes != 0 {
-		t.Fatalf("unsafe cache reuse: %+v", second.Cache)
+	if second.Cache.CachedHashes != 0 {
+		t.Fatalf("archive hash reuse must stay disabled: %+v", second.Cache)
 	}
 	if second.Cache.ComputedHashes == 0 {
 		t.Fatalf("second scan must recompute hashes: %+v", second.Cache)
-	}
-	if second.Summary.CandidateCount != first.Summary.CandidateCount {
-		t.Fatalf("candidates first=%d second=%d", first.Summary.CandidateCount, second.Summary.CandidateCount)
 	}
 }
 

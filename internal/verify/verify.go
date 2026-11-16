@@ -424,6 +424,16 @@ func verifyContent(ctx context.Context, opened archive.Archive, tree *fswalk.Tre
 
 // lookupArchiveHashes はキャッシュから ZIP エントリのハッシュを復元する。
 // キャッシュに無い・キーが合わない場合は空を返し、呼び出し側が計算する。
+// lookupArchiveHashes は ZIP エントリのハッシュをキャッシュから復元する。
+//
+// キャッシュのキーはセントラルディレクトリの構造指紋（エントリ名・圧縮方式・
+// CRC32・サイズ）で、CRC32 は展開後の内容のチェックサムである。内容が変われば
+// 指紋が変わるため、通常の差し替えはキャッシュに当たらない。
+//
+// ただし CRC32 は圧縮データの破損を検出できない。破損した ZIP は
+// セントラルディレクトリが無傷のまま残るので、構造指紋が一致してしまう。
+// そのため、キャッシュを使うのは「前回の検証で CRC まで確認済み」の
+// エントリに限る。CRC 不一致を観測した記録は保存しない（saveArchiveHashes）。
 func lookupArchiveHashes(opened archive.Archive, keys []string, variant archive.Variant, opts Options) (map[string][]byte, int) {
 	if opts.Hashes == nil {
 		return nil, 0

@@ -241,12 +241,25 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 	// 変わっていない項目だけを再利用する。判定に迷う要素があれば再検証する。
 	stats := &cacheStats{}
 	walker := newFolderWalker()
+	// 判定（Verdict）の再利用は行わない。
+	//
+	// フォルダ指紋は相対パス・サイズ・更新時刻から作るため、同じサイズ・
+	// 同じ更新時刻のまま中身だけ差し替えたフォルダを検出できない。実際に
+	// 「alpha」を「bravo」へ差し替えて更新時刻を戻すと、前回の
+	// DELETE_CANDIDATE がそのまま再利用され、内容が違うフォルダが削除候補に
+	// 残ることをテストで確認した（TestCachedScanDetectsSameSizeRestoredTimeFolderChange）。
+	//
+	// ZIP エントリのハッシュキャッシュも使わない。キーはセントラルディレクトリの
+	// 構造指紋（CRC32 を含む）だが、CRC32 は圧縮データの破損を検出できない。
+	// 破損した ZIP はセントラルディレクトリが無傷のまま残るため指紋が一致し、
+	// 破損 ZIP を「一致」と誤表示することをテストで確認した
+	// （TestCachedScanDetectsCorruptArchiveWithUnchangedMetadata）。
+	//
+	// どちらも「削除候補を誤って提示しない」という不変条件を破るため、
+	// 内容の同一性を実体から確認できる方法ができるまで再利用しない。
 	prev := (*previousIndex)(nil)
-	// メタデータや中央ディレクトリだけでは内容変更を確実に検出できない。
-	// 内容に基づく安全な再利用方法を実装するまで、前回判定は使用しない。
 
 	items, compared, err := runVerifyTasks(ctx, tasks, workers, limits, roots, state, total, scanOptions{
-		// ZIP内の圧縮データが同じとは限らないためハッシュも再利用しない。
 		hashes: nil,
 		stats:  stats,
 		walker: walker,

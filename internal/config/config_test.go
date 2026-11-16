@@ -81,3 +81,31 @@ func TestLoadInvalidJSON(t *testing.T) {
 		t.Fatalf("limits = %+v", cfg.Limits)
 	}
 }
+
+func TestLoadNormalizesWorkers(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want int
+	}{
+		{name: "auto", data: `{}`, want: 0},
+		{name: "explicit", data: `{"workers":4}`, want: 4},
+		{name: "negative", data: `{"workers":-3}`, want: 0},
+		{name: "too large", data: `{"workers":99}`, want: 16},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, _, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Workers != tc.want {
+				t.Fatalf("workers = %d, want %d", cfg.Workers, tc.want)
+			}
+		})
+	}
+}

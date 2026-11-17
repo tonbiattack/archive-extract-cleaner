@@ -26,7 +26,7 @@ func TestSavedTriageSurvivesVerifiedFolderCleanupRescan(t *testing.T) {
 	if len(ids) != 1 {
 		t.Fatal(ids)
 	}
-	if err := app.SetTriage(ids[0], "save"); err != nil {
+	if _, err := app.SetTriageDetailed(ids[0], "save"); err != nil {
 		t.Fatal(err)
 	}
 	res, err := app.DeleteSelected([]MoveRequest{{ID: ids[0], Method: MoveMethodFolder}}, true)

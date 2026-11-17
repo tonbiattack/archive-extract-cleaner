@@ -24,7 +24,16 @@
     });
   }
   function validDiscardPreview(preview) {
-    return !!preview && typeof preview.token === 'string' && !!preview.token && Array.isArray(preview.paths) && preview.paths.length > 0 && preview.paths.every(path => typeof path === 'string' && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(path));
+    if (!preview || typeof preview.token !== 'string' || !preview.token || !Array.isArray(preview.paths) || !preview.paths.length || !Array.isArray(preview.targets) || preview.targets.length !== preview.paths.length) return false;
+    if (!Number.isInteger(preview.fileCount) || !Number.isInteger(preview.folderCount) || preview.fileCount < 0 || preview.folderCount < 0 || preview.fileCount + preview.folderCount !== preview.paths.length) return false;
+    const paths = new Set(preview.paths);
+    if (paths.size !== preview.paths.length || !preview.paths.every(path => typeof path === 'string' && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(path))) return false;
+    const targets = new Set();
+    for (const target of preview.targets) {
+      if (!target || !paths.has(target.path) || targets.has(target.path) || !['file', 'folder'].includes(target.kind) || target.reason !== 'manual_discard' || typeof target.itemId !== 'string' || !target.itemId) return false;
+      targets.add(target.path);
+    }
+    return preview.targets.filter(target => target.kind === 'file').length === preview.fileCount && preview.targets.filter(target => target.kind === 'folder').length === preview.folderCount;
   }
   return { status, shortcut, savedCandidates, validPreview, validDiscardPreview };
 });

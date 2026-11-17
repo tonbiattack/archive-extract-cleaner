@@ -9,16 +9,26 @@ import (
 	"os"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/removal"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
 
 type DiscardPreview struct {
-	Token       string   `json:"token"`
-	Paths       []string `json:"paths"`
-	ItemCount   int      `json:"itemCount"`
-	TargetCount int      `json:"targetCount"`
-	Bytes       int64    `json:"bytes"`
+	Token       string          `json:"token"`
+	Paths       []string        `json:"paths"`
+	ItemCount   int             `json:"itemCount"`
+	TargetCount int             `json:"targetCount"`
+	Bytes       int64           `json:"bytes"`
+	FileCount   int             `json:"fileCount"`
+	FolderCount int             `json:"folderCount"`
+	Targets     []DiscardTarget `json:"targets"`
+}
+type DiscardTarget struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+	ItemID string `json:"itemId"`
 }
 type discardSnapshot struct {
 	token        string
@@ -108,12 +118,23 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 	}
 	// Never recycle a directory that contains another scanned item, even when
 	// that item is also selected: otherwise paths and per-target results lie.
+	targets := make([]DiscardTarget, 0, len(snapshot.paths))
+	fileCount, folderCount := 0, 0
 	for _, target := range snapshot.paths {
 		info, err := os.Lstat(target)
 		if err != nil {
 			return DiscardPreview{}, fmt.Errorf("item %s path %s: cannot inspect target: %w", snapshot.owners[target], target, err)
 		}
-		_ = info
+		kind := "file"
+		if info.IsDir() {
+			kind = "folder"
+			folderCount++
+		} else if info.Mode().IsRegular() {
+			fileCount++
+		} else {
+			return DiscardPreview{}, fmt.Errorf("item %s path %s: unsupported target type", snapshot.owners[target], target)
+		}
+		targets = append(targets, DiscardTarget{Path: target, Kind: kind, Reason: "manual_discard", ItemID: snapshot.owners[target]})
 		for _, item := range a.items {
 			for _, other := range append([]string{item.ZipPath, item.FolderPath}, item.RelatedFolders...) {
 				if other != "" && ((item.ID != snapshot.owners[target] && (winpath.EqualPath(target, other) || winpath.IsWithin(other, target))) || (!winpath.EqualPath(target, other) && winpath.IsWithin(target, other))) {
@@ -128,9 +149,34 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 	}
 	snapshot.token = hex.EncodeToString(token)
 	a.discardPreview = snapshot
-	return DiscardPreview{Token: snapshot.token, Paths: append([]string(nil), snapshot.paths...), ItemCount: len(snapshot.ids), TargetCount: len(snapshot.paths), Bytes: total}, nil
+	return DiscardPreview{Token: snapshot.token, Paths: append([]string(nil), snapshot.paths...), ItemCount: len(snapshot.ids), TargetCount: len(snapshot.paths), Bytes: total, FileCount: fileCount, FolderCount: folderCount, Targets: targets}, nil
 }
+
+type DiscardDetailedResult struct {
+	Results []DiscardResult `json:"results"`
+	Warning string          `json:"warning"`
+}
+
+// RecycleDiscardDetailed keeps completed target results in the resolved response,
+// including when audit logging fails after moves have started.
+func (a *App) RecycleDiscardDetailed(token string, confirmed bool) (DiscardDetailedResult, error) {
+	results, err := a.recycleDiscard(token, confirmed)
+	if err != nil && results == nil {
+		return DiscardDetailedResult{}, err
+	}
+	result := DiscardDetailedResult{Results: results}
+	if err != nil {
+		result.Warning = err.Error()
+	}
+	return result, nil
+}
+
+// RecycleDiscard is deprecated: use RecycleDiscardDetailed to receive all outcomes.
 func (a *App) RecycleDiscard(token string, confirmed bool) ([]DiscardResult, error) {
+	return nil, errors.New("RecycleDiscard is deprecated; use RecycleDiscardDetailed")
+}
+
+func (a *App) recycleDiscard(token string, confirmed bool) ([]DiscardResult, error) {
 	if !confirmed {
 		return nil, errors.New("explicit confirmation required")
 	}
@@ -169,15 +215,23 @@ func (a *App) RecycleDiscard(token string, confirmed bool) ([]DiscardResult, err
 	a.mu.Unlock()
 	defer func() { a.mu.Lock(); a.deleting = false; a.mu.Unlock() }()
 	results := make([]DiscardResult, 0, len(snap.paths))
+	var auditErr error
+	logResult := func(r DiscardResult) {
+		if err := a.appendManualAudit(oplog.Entry{Action: "recycle", ID: snap.owners[r.Path], Path: r.Path, Reason: "manual_discard", Success: r.Success, Error: r.Reason}); err != nil {
+			auditErr = errors.Join(auditErr, fmt.Errorf("%s: %w", r.Path, err))
+		}
+	}
 	for _, p := range snap.paths {
 		fp, err := triageFingerprint(model.Item{ID: "target", ZipPath: p}, roots)
 		if err != nil || fp != snap.targetHashes[p] {
 			results = append(results, DiscardResult{Path: p, Reason: "target changed since preview"})
+			logResult(results[len(results)-1])
 			continue
 		}
 		info, err := os.Lstat(p)
 		if err != nil {
 			results = append(results, DiscardResult{Path: p, Reason: err.Error()})
+			logResult(results[len(results)-1])
 			continue
 		}
 		kind := removal.KindFile
@@ -233,6 +287,10 @@ func (a *App) RecycleDiscard(token string, confirmed bool) ([]DiscardResult, err
 			}
 			a.mu.Unlock()
 		}
+		logResult(results[len(results)-1])
+	}
+	if auditErr != nil {
+		return results, fmt.Errorf("recycle completed; audit failed (do not retry without a new preview): %w", auditErr)
 	}
 	return results, nil
 }

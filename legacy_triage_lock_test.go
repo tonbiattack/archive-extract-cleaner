@@ -35,7 +35,7 @@ func TestLegacyCleanupExcludedWhileDiscardMovesArchive(t *testing.T) {
 	if _, err := discard.Scan(legacy.roots); err != nil {
 		t.Fatal(err)
 	}
-	if err := discard.SetTriage(id, "discard"); err != nil {
+	if _, err := discard.SetTriageDetailed(id, "discard"); err != nil {
 		t.Fatal(err)
 	}
 	preview, err := discard.PreviewDiscard([]string{id})
@@ -56,7 +56,7 @@ func TestLegacyCleanupExcludedWhileDiscardMovesArchive(t *testing.T) {
 		}
 		return os.ErrPermission
 	}
-	if _, err := discard.RecycleDiscard(preview.Token, true); err != nil {
+	if _, err := discard.RecycleDiscardDetailed(preview.Token, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{zip, folder} {
@@ -73,7 +73,7 @@ func TestDiscardExcludedWhileLegacyCleanupMovesFolder(t *testing.T) {
 	if _, err := discard.Scan(legacy.roots); err != nil {
 		t.Fatal(err)
 	}
-	if err := discard.SetTriage(id, "discard"); err != nil {
+	if _, err := discard.SetTriageDetailed(id, "discard"); err != nil {
 		t.Fatal(err)
 	}
 	preview, err := discard.PreviewDiscard([]string{id})
@@ -83,7 +83,7 @@ func TestDiscardExcludedWhileLegacyCleanupMovesFolder(t *testing.T) {
 	discardCalled := false
 	discard.mover = func(string) error { discardCalled = true; return nil }
 	legacy.mover = func(string) error {
-		_, err := discard.RecycleDiscard(preview.Token, true)
+		_, err := discard.RecycleDiscardDetailed(preview.Token, true)
 		if err == nil {
 			t.Error("discard bypassed lock during cleanup")
 		}

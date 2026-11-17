@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,15 +10,20 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/winpath"
 )
 
 type triageDecision struct {
-	State         string `json:"state"`
-	Fingerprint   string `json:"fingerprint"`
-	RemovedFolder string `json:"removedFolder,omitempty"`
+	State             string `json:"state"`
+	Fingerprint       string `json:"fingerprint"`
+	RemovedFolder     string `json:"removedFolder,omitempty"`
+	Revision          string `json:"revision,omitempty"`
+	UndoPrevious      string `json:"undoPrevious,omitempty"`
+	UndoRemovedFolder string `json:"undoRemovedFolder,omitempty"`
 }
 
 func (a *App) triageFile() string {
@@ -29,6 +35,22 @@ func (a *App) triageFile() string {
 		return ""
 	}
 	return filepath.Join(dir, "archive-extract-cleaner", "triage.json")
+}
+
+func (a *App) appendManualAudit(entry oplog.Entry) error {
+	logger := a.log
+	if logger == nil {
+		path := a.logPath
+		if path == "" {
+			path = a.triageFile() + ".audit.jsonl"
+		}
+		logger = oplog.New(path)
+	}
+	if logger.Path() == "" {
+		return errors.New("audit storage unavailable")
+	}
+	entry.Time = time.Now().UTC()
+	return logger.Append(entry)
 }
 
 // lockTriage serializes read-modify-write transactions across processes. A crash
@@ -199,44 +221,114 @@ func triageState(item model.Item, roots []string, decisions map[string]triageDec
 	return d.State
 }
 
-// SetTriage persists a decision without moving or deleting any files.
+type TriageResult struct {
+	Previous  string `json:"previous"`
+	State     string `json:"state"`
+	Warning   string `json:"warning"`
+	UndoToken string `json:"undoToken,omitempty"`
+}
+
+// SetTriage is deprecated: use SetTriageDetailed to receive committed outcomes.
 func (a *App) SetTriage(id, state string) error {
+	return errors.New("SetTriage is deprecated; use SetTriageDetailed")
+}
+
+// SetTriageDetailed reports the previous effective state from the transaction.
+func (a *App) SetTriageDetailed(id, state string) (TriageResult, error) {
+	return a.updateTriage(id, state, nil)
+}
+
+// RestoreTriage consumes the token only for its exact, unchanged operation.
+func (a *App) RestoreTriage(id, undoToken string) (TriageResult, error) {
+	if undoToken == "" {
+		return TriageResult{}, errors.New("invalid undo token")
+	}
+	return a.updateTriage(id, "", &undoToken)
+}
+
+func validTriageState(state string) bool {
 	switch state {
 	case "save", "discard", "hold", "unjudged":
-	default:
-		return errors.New("invalid triage state")
+		return true
+	}
+	return false
+}
+
+func (a *App) updateTriage(id, state string, undoToken *string) (TriageResult, error) {
+	if undoToken == nil && !validTriageState(state) {
+		return TriageResult{}, errors.New("invalid triage state")
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.scanning || a.deleting {
-		return errors.New("operation in progress")
+		return TriageResult{}, errors.New("operation in progress")
 	}
 	a.discardPreview = nil
 	a.triageDisplay = nil
 	i, ok := a.index[id]
 	if !ok {
-		return errors.New("item not found")
+		return TriageResult{}, errors.New("item not found")
 	}
 	path := a.triageFile()
 	unlock, err := lockTriage(path)
 	if err != nil {
-		return err
+		return TriageResult{}, err
 	}
 	defer unlock()
 	m, err := readTriage(path)
 	if err != nil {
-		return err
+		return TriageResult{}, err
 	}
-	if state == "unjudged" {
-		delete(m, id)
-	} else {
-		fp, err := triageFingerprint(a.items[i], a.roots)
-		if err != nil {
-			return err
+	fp, err := triageFingerprint(a.items[i], a.roots)
+	if err != nil {
+		return TriageResult{}, err
+	}
+	current := m[id]
+	oldState := "unjudged"
+	if (current.State == "save" || current.State == "discard" || current.State == "hold") && current.Fingerprint == fp {
+		if current.RemovedFolder == "" {
+			oldState = current.State
+		} else if _, err := os.Lstat(current.RemovedFolder); errors.Is(err, os.ErrNotExist) {
+			oldState = current.State
 		}
-		m[id] = triageDecision{State: state, Fingerprint: fp}
 	}
-	return writeTriage(path, m)
+	removedFolder := ""
+	if undoToken != nil {
+		if current.Revision == "" || current.Revision != *undoToken || current.Fingerprint != fp || !validTriageState(current.UndoPrevious) || oldState != current.State {
+			return TriageResult{}, errors.New("triage undo conflict: operation or content changed")
+		}
+		state = current.UndoPrevious
+		removedFolder = current.UndoRemovedFolder
+		if removedFolder != "" {
+			if _, err := os.Lstat(removedFolder); !errors.Is(err, os.ErrNotExist) {
+				return TriageResult{}, errors.New("triage undo conflict: removed folder changed")
+			}
+		}
+	}
+	var random [32]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return TriageResult{}, err
+	}
+	revision := hex.EncodeToString(random[:])
+	next := triageDecision{State: state, Fingerprint: fp, RemovedFolder: removedFolder, Revision: revision}
+	if undoToken == nil {
+		next.UndoPrevious = oldState
+		if oldState != "unjudged" {
+			next.UndoRemovedFolder = current.RemovedFolder
+		}
+	}
+	m[id] = next
+	if err := writeTriage(path, m); err != nil {
+		return TriageResult{}, err
+	}
+	result := TriageResult{Previous: oldState, State: state}
+	if undoToken == nil {
+		result.UndoToken = revision
+	}
+	if err := a.appendManualAudit(oplog.Entry{Action: "triage", ID: id, OldState: oldState, NewState: state, Reason: "manual_triage", Success: true}); err != nil {
+		result.Warning = fmt.Sprintf("decision saved, but audit failed: %v", err)
+	}
+	return result, nil
 }
 
 func (a *App) savedItemsLocked() []model.Item {

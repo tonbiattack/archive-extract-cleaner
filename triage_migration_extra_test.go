@@ -38,7 +38,7 @@ func TestCleanupMigrationSafety(t *testing.T) {
 				t.Fatal(err)
 			}
 			ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
-			if err := app.SetTriage(ids[0], "save"); err != nil {
+			if _, err := app.SetTriageDetailed(ids[0], "save"); err != nil {
 				t.Fatal(err)
 			}
 			app.mover = func(p string) error { return tc.mover(p, zip) }

@@ -64,7 +64,7 @@
       </div>
       <label>整理状態 <select id="triageFilter" aria-label="整理状態で絞り込み"><option value="all">すべて</option><option value="unjudged">未判定</option><option value="save">保存</option><option value="discard">破棄</option><option value="hold">保留</option></select></label>
       <div id="triageActions" class="triage-actions" role="group" aria-label="選択項目の整理状態">
-        <button class="btn" data-triage="save">保存 (S)</button><button class="btn" data-triage="discard">破棄 (D)</button><button class="btn" data-triage="hold">保留 (H)</button><button class="btn" data-triage="unjudged">未判定に戻す</button>
+        <button class="btn" data-triage="save">保存 (S)</button><button class="btn" data-triage="discard">破棄 (D)</button><button class="btn" data-triage="hold">保留 (H)</button><button class="btn" data-triage="unjudged">未判定に戻す</button><button class="btn" id="undoTriageBtn" disabled title="直前の整理状態の変更を元に戻します。ファイルは復元しません">整理状態を元に戻す</button>
       </div>
       <div class="toolbar-actions">
         <label class="row-height-control">行の高さ <input id="rowHeight" type="range" min="24" max="64" step="1" aria-label="行の高さ"> <output id="rowHeightValue"></output></label>

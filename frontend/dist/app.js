@@ -786,6 +786,7 @@
       zipPath: row.zipPath,
       folderPath: row.folderPath,
       deletable: row.deletable,
+      triage: window.Triage.status(row),
     });
   }
 
@@ -1070,7 +1071,8 @@
     el("discardBtn").disabled = state.busy || state.selected.size === 0;
     clearSelectionBtn.disabled = state.busy || state.selected.size === 0;
     rowsEl.querySelectorAll('input[data-role="select"]').forEach(input => { input.disabled = state.busy; });
-    el("triageActions").querySelectorAll("button").forEach(button => { button.disabled = state.busy || !state.selected.size; });
+    el("triageActions").querySelectorAll("[data-triage]").forEach(button => { button.disabled = state.busy || !state.selected.size; });
+    el("undoTriageBtn").disabled = state.busy || !state.triageUndo || !state.triageUndo.length;
   }
 
   async function selectAllCandidates() {
@@ -1100,13 +1102,43 @@
     if (state.busy || !state.selected.size) return;
     cancelDragSelection();
     const ids = Array.from(state.selected.keys());
+    state.triageUndo = [];
     state.busy = true; updateBusyUI(); updateSelectionUI();
-    let completed = 0;
+    let completed = 0, failure = "";
+    const warnings = [];
     try {
-      for (const id of ids) { await api("SetTriage", id, value); completed++; }
-      toast(completed + " 件の整理状態を更新しました");
-    } catch (error) { toast("整理状態の更新に失敗しました（更新済み " + completed + " 件）: " + error.message, true); }
-    finally { state.busy = false; updateBusyUI(); updateSelectionUI(); reloadRows(false); if (state.activeId) showDetail(state.activeId); }
+      for (const id of ids) {
+        const result = await api("SetTriageDetailed", id, value);
+        if (typeof result.undoToken === "string" && result.undoToken) state.triageUndo.push({id, undoToken: result.undoToken});
+        else warnings.push(id + ": 元に戻すための情報がないため、この項目は元に戻せません");
+        const selected = state.selected.get(id); if (selected) selected.triage = result.state;
+        if (result.warning) warnings.push(id + ": " + result.warning);
+        completed++;
+      }
+    } catch (error) { failure = "整理状態の更新に失敗しました（更新済み " + completed + " 件）: " + error.message; }
+    finally {
+      toast((failure || completed + " 件の整理状態を更新しました") + (warnings.length ? "。警告: " + warnings.join(" / ") : ""), !!failure || !!warnings.length);
+      state.busy = false; updateBusyUI(); updateSelectionUI(); reloadRows(false); if (state.activeId) showDetail(state.activeId);
+    }
+  }
+
+  async function undoTriage() {
+    if (state.busy || !state.triageUndo || !state.triageUndo.length) return;
+    cancelDragSelection();
+    state.busy = true; updateBusyUI(); updateSelectionUI();
+    const failed = [], warnings = [];
+    for (const entry of state.triageUndo) {
+      try {
+        if (typeof entry.undoToken !== "string" || !entry.undoToken) throw new Error("元に戻すための情報がありません");
+        const result = await api("RestoreTriage", entry.id, entry.undoToken);
+        const selected = state.selected.get(entry.id); if (selected) selected.triage = result.state;
+        if (result.warning) warnings.push(entry.id + ": " + result.warning);
+      } catch (error) { failed.push(entry); }
+    }
+    const restored = state.triageUndo.length - failed.length;
+    state.triageUndo = failed;
+    toast("整理状態を " + restored + " 件元に戻しました" + (failed.length ? "。失敗 " + failed.length + " 件は再試行できます" : "") + "。ファイルの復元は行いません。" + (warnings.length ? " 警告: " + warnings.join(" / ") : ""), !!failed.length || !!warnings.length);
+    state.busy = false; updateBusyUI(); updateSelectionUI(); reloadRows(false); if (state.activeId) showDetail(state.activeId);
   }
 
   // ---------- summary / warnings ----------
@@ -1537,7 +1569,7 @@
               suggestion.reasons.map((reason) => "<li>" + esc(reason) + "</li>").join("") +
               "</ul>"
             : "") +
-          '<p class="modal-note">AIの推薦は削除の根拠になりません。内容の完全一致を確認できていないため、この項目は削除できません。</p>';
+          '<p class="modal-note">AIの推薦は削除の根拠になりません。内容の完全一致を確認できていないため、自動の検証済み重複整理では削除できません。手動破棄は別途明示的な確認が必要です。</p>';
       }
     } else {
       body =
@@ -1883,6 +1915,7 @@
     }
     state.busy = true;
     state.scanning = true;
+    state.triageUndo = [];
     state.selected.clear();
     state.activeId = null;
     state.detailToken++;
@@ -1964,12 +1997,14 @@
       const preview = await api("PreviewDiscard", ids);
       if (!window.Triage.validDiscardPreview(preview)) throw new Error("全対象のフルパスを確認できません");
       if (!Number.isInteger(preview.itemCount) || preview.itemCount !== ids.length || !Number.isInteger(preview.targetCount) || preview.targetCount !== preview.paths.length || !Number.isFinite(preview.bytes) || preview.bytes < 0) throw new Error("選択件数、対象件数またはサイズを確認できません。再スキャンしてください。");
+      if (preview.targets.some(target => !ids.includes(target.itemId))) throw new Error("選択外の対象が含まれています");
+      const details = '<p>対象 ' + preview.itemCount + ' 項目 / ファイル ' + preview.fileCount + ' 件 / フォルダ ' + preview.folderCount + ' 件 / ' + esc(fmtBytes(preview.bytes)) + '</p><ul class="move-targets">' + preview.targets.map(target => '<li>' + esc(target.path) + ' — ' + (target.kind === 'file' ? 'ファイル' : 'フォルダ') + ' / 手動で破棄と判定（内容一致の検証による重複判定ではありません）</li>').join('') + '</ul>';
       openModal({
-        title: "破棄対象の最終確認", wide: true,
-        body: '<p>対象 ' + preview.itemCount + ' 項目 / ' + preview.targetCount + ' 件 / ' + esc(fmtBytes(preview.bytes)) + '</p><p class="modal-note">以下のすべてのパスをWindowsのごみ箱へ移動します。最後のコピーが失われる可能性があります。</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>',
+        title: "手動破棄対象の確認", wide: true,
+        body: '<p class="modal-note">以下のすべてのパスをWindowsのごみ箱へ移動します。最後のコピーが失われる可能性があります。</p>' + details,
         actions: [
           {label: "キャンセル", className: "btn", onClick: closeModal},
-          {label: "確認を続ける", className: "btn danger", onClick: () => openModal({title:"アーカイブ破棄の追加確認", wide:true, body:'<p>アーカイブを含む破棄対象を移動すると、最後のコピーが失われる可能性があります。全パスを確認し、破棄することに同意しますか？</p><p>対象 ' + preview.itemCount + ' 項目 / ' + preview.targetCount + ' 件 / ' + esc(fmtBytes(preview.bytes)) + '</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>', actions:[{label:"キャンセル", onClick:closeModal}, {label:"同意してごみ箱に移動", className:"btn danger", onClick:() => executeDiscard(preview.token)}]})}
+          {label: "確認を続ける", className: "btn danger", onClick: () => openModal({title:"手動破棄の追加確認", wide:true, body:'<p>手動破棄対象を移動すると、最後のコピーが失われる可能性があります。全パスを確認し、破棄することに同意しますか？</p>' + details, actions:[{label:"キャンセル", onClick:closeModal}, {label:"同意してごみ箱に移動", className:"btn danger", onClick:() => executeDiscard(preview.token)}]})}
         ]
       });
     } catch (error) { toast("破棄対象の確認に失敗しました（全選択項目は処理されません）: " + (error.message || String(error)), true); }
@@ -1978,12 +2013,13 @@
 
   async function executeDiscard(token) {
     if (state.busy) return;
-    state.busy = true; state.deleting = true; updateBusyUI(); updateSelectionUI();
+    state.busy = true; state.deleting = true; state.triageUndo = []; updateBusyUI(); updateSelectionUI();
     openModal({title:"ごみ箱に移動しています", body:"処理中です。", actions:[], closable:false});
     try {
-      const results = await api("RecycleDiscard", token, true);
+      const outcome = await api("RecycleDiscardDetailed", token, true);
+      const results = outcome && outcome.results;
       if (!Array.isArray(results)) throw new Error("処理結果を確認できません");
-      const body = '<ul class="move-targets">' + results.map(result => '<li>' + esc(result.path) + ' — ' + (result.success ? '成功' + (result.reason ? '（警告: ' + esc(result.reason) + '）' : '') : '失敗: ' + esc(result.reason || '理由不明')) + '</li>').join('') + '</ul>';
+      const body = (outcome.warning ? '<p class="result-fail">警告: ' + esc(outcome.warning) + '</p>' : '') + '<ul class="move-targets">' + results.map(result => '<li>' + esc(result.path) + ' — ' + (result.success ? '成功' + (result.reason ? '（警告: ' + esc(result.reason) + '）' : '') : '失敗: ' + esc(result.reason || '理由不明')) + '</li>').join('') + '</ul>';
       state.selected.clear();
       state.deleting = false;
       openModal({title:"ごみ箱移動の結果", body, wide:true, actions:[{label:"閉じる", className:"btn", onClick:closeModal}]});
@@ -2802,6 +2838,7 @@
 
     el("triageFilter").addEventListener("change", event => { state.triageFilter = event.target.value; reloadRows(true); });
     el("triageActions").addEventListener("click", event => { const button = event.target.closest("[data-triage]"); if (button && !button.disabled) setTriage(button.dataset.triage); });
+    el("undoTriageBtn").addEventListener("click", undoTriage);
     filterBar.addEventListener("click", (event) => {
       const button = event.target.closest("[data-filter]");
       if (!button) return;

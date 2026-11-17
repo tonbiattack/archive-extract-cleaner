@@ -100,6 +100,12 @@ func writeTriage(path string, m map[string]triageDecision) error {
 	return os.Rename(name, path)
 }
 func triageFingerprint(item model.Item, roots []string) (string, error) {
+	fp, _, err := triageFingerprintSize(item, roots)
+	return fp, err
+}
+
+func triageFingerprintSize(item model.Item, roots []string) (string, int64, error) {
+	var total int64
 	zipPath, folderPath := item.ZipPath, item.FolderPath
 	if item.ZipMoved {
 		zipPath = ""
@@ -117,20 +123,20 @@ func triageFingerprint(item model.Item, roots []string) (string, error) {
 		}
 		abs, err := winpath.CleanAbs(p)
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 		safe := false
 		for _, root := range roots {
 			if !winpath.EqualPath(root, abs) && winpath.IsWithin(root, abs) {
 				if err = winpath.CheckNoReparseAncestors(root, abs); err != nil {
-					return "", err
+					return "", 0, err
 				}
 				safe = true
 				break
 			}
 		}
 		if !safe {
-			return "", errors.New("path outside scan roots")
+			return "", 0, errors.New("path outside scan roots")
 		}
 		err = filepath.Walk(abs, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -150,6 +156,10 @@ func triageFingerprint(item model.Item, roots []string) (string, error) {
 			if !info.Mode().IsRegular() {
 				return errors.New("unsupported file type")
 			}
+			if info.Size() > int64(^uint64(0)>>1)-total {
+				return errors.New("total size exceeds supported range")
+			}
+			total += info.Size()
 			f, err := os.Open(path)
 			if err != nil {
 				return err
@@ -162,10 +172,10 @@ func triageFingerprint(item model.Item, roots []string) (string, error) {
 			return closeErr
 		})
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), total, nil
 }
 func triageState(item model.Item, roots []string, decisions map[string]triageDecision) string {
 	d, ok := decisions[item.ID]

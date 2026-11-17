@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
@@ -13,8 +14,11 @@ import (
 )
 
 type DiscardPreview struct {
-	Token string   `json:"token"`
-	Paths []string `json:"paths"`
+	Token       string   `json:"token"`
+	Paths       []string `json:"paths"`
+	ItemCount   int      `json:"itemCount"`
+	TargetCount int      `json:"targetCount"`
+	Bytes       int64    `json:"bytes"`
 }
 type discardSnapshot struct {
 	token        string
@@ -47,21 +51,22 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 	snapshot := &discardSnapshot{fingerprints: map[string]string{}, targetHashes: map[string]string{}, owners: map[string]string{}}
 	seen := map[string]bool{}
 	pathSeen := map[string]bool{}
+	var total int64
 	for _, id := range ids {
 		if seen[id] {
-			return DiscardPreview{}, errors.New("duplicate item")
+			return DiscardPreview{}, fmt.Errorf("item %s: selected more than once; remove the duplicate", id)
 		}
 		seen[id] = true
 		idx, ok := a.index[id]
 		if !ok {
-			return DiscardPreview{}, errors.New("item not found")
+			return DiscardPreview{}, fmt.Errorf("item %s: not found; refresh the selection", id)
 		}
 		item := a.items[idx]
 		if len(item.RelatedFolders) > 0 {
-			return DiscardPreview{}, errors.New("ambiguous item cannot be recycled")
+			return DiscardPreview{}, fmt.Errorf("item %s (archive %s, folder %s, related folders %s): ambiguous; resolve the related folders before recycling", id, item.ZipPath, item.FolderPath, item.RelatedFolders)
 		}
 		if triageState(item, a.roots, decisions) != "discard" {
-			return DiscardPreview{}, errors.New("item is not currently discarded")
+			return DiscardPreview{}, fmt.Errorf("item %s (archive %s, folder %s): not currently discarded or changed; review and mark discard again", id, item.ZipPath, item.FolderPath)
 		}
 		snapshot.ids = append(snapshot.ids, id)
 		snapshot.fingerprints[id] = decisions[id].Fingerprint
@@ -78,17 +83,21 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 			}
 			abs, err := winpath.CleanAbs(p)
 			if err != nil {
-				return DiscardPreview{}, err
+				return DiscardPreview{}, fmt.Errorf("item %s path %s: invalid target: %w", id, p, err)
 			}
 			key := winpath.Key(abs)
 			if pathSeen[key] {
-				return DiscardPreview{}, errors.New("duplicate target path")
+				return DiscardPreview{}, fmt.Errorf("item %s path %s: duplicate target; remove the duplicate selection", id, abs)
 			}
 			pathSeen[key] = true
-			fp, err := triageFingerprint(model.Item{ID: "target", ZipPath: abs}, a.roots)
+			fp, size, err := triageFingerprintSize(model.Item{ID: "target", ZipPath: abs}, a.roots)
 			if err != nil {
-				return DiscardPreview{}, err
+				return DiscardPreview{}, fmt.Errorf("item %s path %s: cannot inspect target: %w", id, abs, err)
 			}
+			if size > int64(^uint64(0)>>1)-total {
+				return DiscardPreview{}, fmt.Errorf("item %s path %s: total size exceeds supported range", id, abs)
+			}
+			total += size
 			snapshot.targetHashes[abs] = fp
 			snapshot.owners[abs] = id
 			snapshot.paths = append(snapshot.paths, abs)
@@ -102,13 +111,13 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 	for _, target := range snapshot.paths {
 		info, err := os.Lstat(target)
 		if err != nil {
-			return DiscardPreview{}, err
+			return DiscardPreview{}, fmt.Errorf("item %s path %s: cannot inspect target: %w", snapshot.owners[target], target, err)
 		}
 		_ = info
 		for _, item := range a.items {
 			for _, other := range append([]string{item.ZipPath, item.FolderPath}, item.RelatedFolders...) {
 				if other != "" && ((item.ID != snapshot.owners[target] && (winpath.EqualPath(target, other) || winpath.IsWithin(other, target))) || (!winpath.EqualPath(target, other) && winpath.IsWithin(target, other))) {
-					return DiscardPreview{}, errors.New("folder contains another scanned item")
+					return DiscardPreview{}, fmt.Errorf("item %s path %s overlaps item %s path %s; resolve the overlap before recycling", snapshot.owners[target], target, item.ID, other)
 				}
 			}
 		}
@@ -119,7 +128,7 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 	}
 	snapshot.token = hex.EncodeToString(token)
 	a.discardPreview = snapshot
-	return DiscardPreview{Token: snapshot.token, Paths: append([]string(nil), snapshot.paths...)}, nil
+	return DiscardPreview{Token: snapshot.token, Paths: append([]string(nil), snapshot.paths...), ItemCount: len(snapshot.ids), TargetCount: len(snapshot.paths), Bytes: total}, nil
 }
 func (a *App) RecycleDiscard(token string, confirmed bool) ([]DiscardResult, error) {
 	if !confirmed {

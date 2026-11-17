@@ -39,7 +39,8 @@ jobs:
         run: go test ./... -count=1
 
       - name: Frontend tests
-        run: node --test frontend/tests
+        shell: bash
+        run: node --test frontend/tests/*.test.js
 
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1

@@ -94,6 +94,7 @@ func (a *sevenZipArchive) Close() error { return nil }
 func (a *sevenZipArchive) Open(entry Entry) (io.ReadCloser, error) {
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, a.tool, "x", "-so", "-bd", a.path, entry.Path)
+	hideSevenZipConsole(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -157,6 +158,7 @@ func listSevenZip(tool, path string, limits model.Limits) ([]Entry, int64, error
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tool, "l", "-slt", "-bd", path)
+	hideSevenZipConsole(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()

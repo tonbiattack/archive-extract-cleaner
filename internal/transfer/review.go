@@ -11,6 +11,7 @@ import (
 )
 
 type Candidate struct {
+	Triage   string `json:"triage"`
 	ID       string `json:"id"`
 	Path     string `json:"path"`
 	Name     string `json:"name"`

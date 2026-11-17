@@ -10,6 +10,7 @@ import (
 )
 
 type RowQuery struct {
+	Triage string `json:"triage"`
 	Search string `json:"search"`
 	Filter string `json:"filter"`
 	Sort   string `json:"sort"`
@@ -19,6 +20,7 @@ type RowQuery struct {
 }
 
 type Row struct {
+	Triage      string    `json:"triage"`
 	ID          string    `json:"id"`
 	Verdict     string    `json:"verdict"`
 	Status      string    `json:"status"`
@@ -44,6 +46,7 @@ type Row struct {
 }
 
 type RowPage struct {
+	TriageError  string              `json:"triageError,omitempty"`
 	Rows         []Row               `json:"rows"`
 	Total        int                 `json:"total"`
 	Offset       int                 `json:"offset"`

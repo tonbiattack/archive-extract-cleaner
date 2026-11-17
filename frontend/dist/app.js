@@ -24,6 +24,7 @@
   const state = {
     roots: [],
     filter: "all",
+    triageFilter: "all",
     search: "",
     sort: "verdict",
     desc: false,
@@ -529,6 +530,7 @@
     return {
       search: state.search,
       filter: state.filter,
+      triage: state.triageFilter,
       sort: state.sort,
       desc: state.desc,
       offset: offset || 0,
@@ -553,6 +555,8 @@
   }
 
   function renderRows() {
+    const focused = document.activeElement;
+    const focusedId = focused && rowsEl.contains(focused) && focused.matches('input[data-role="select"]') ? focused.dataset.id : null;
     const total = state.total;
     virtualEl.style.height = Math.max(0, total) * sizing.row() + "px";
 
@@ -578,6 +582,10 @@
       html.push(row ? rowHtml(row, index) : placeholderHtml(index));
     }
     rowsEl.innerHTML = html.join("");
+    if (focusedId) {
+      const checkbox = Array.from(rowsEl.querySelectorAll('input[data-role="select"]')).find(input => input.dataset.id === focusedId);
+      if (checkbox) checkbox.focus({preventScroll:true});
+    }
 
     const firstPage = Math.floor(start / PAGE_SIZE);
     const lastPage = Math.floor(Math.max(start, end - 1) / PAGE_SIZE);
@@ -614,13 +622,11 @@
     if (selected) classes.push("selected");
     if (active) classes.push("active");
     if (row.status === "deleted") classes.push("deleted");
-    const checkbox = row.deletable
-      ? '<input type="checkbox" data-role="select" data-id="' +
+    const checkbox = '<input type="checkbox" data-role="select" aria-label="' + esc((row.name || row.id) + " を選択") + '" data-id="' +
         esc(row.id) +
         '" ' +
-        (selected ? "checked" : "") +
-        ">"
-      : '<span class="muted" title="削除候補ではないため選択できません">—</span>';
+        (selected ? "checked" : "") + (state.busy ? " disabled" : "") +
+        ">";
     const zipName = row.zipPath ? baseName(row.zipPath) : "";
     const folderName = row.folderPath ? baseName(row.folderPath) : "";
     return (
@@ -641,6 +647,7 @@
       esc(row.name) +
       '">' +
       esc(row.name || "—") +
+      '<span class="triage-badge">' + esc(({save:"保存", discard:"破棄", hold:"保留", unjudged:"未判定"})[window.Triage.status(row)]) + '</span>' +
       "</div>" +
       '<div class="cell path-cell" title="' +
       esc(row.zipPath) +
@@ -727,6 +734,8 @@
   }
 
   function applyMeta(page) {
+    if (page.triageError && state.triageError !== page.triageError) toast("整理状態の読み込みに失敗しました: " + page.triageError, true);
+    state.triageError = page.triageError || "";
     if (page.summary) {
       state.summary = page.summary;
     }
@@ -767,13 +776,14 @@
   // ---------- selection ----------
 
   function addSelection(row) {
-    if (!row || !row.deletable) return;
+    if (!row) return;
     state.selected.set(row.id, {
       id: row.id,
       name: row.name,
       size: row.size,
       zipPath: row.zipPath,
       folderPath: row.folderPath,
+      deletable: row.deletable,
     });
   }
 
@@ -782,21 +792,22 @@
   }
 
   function rangeSelect(index) {
+    if (state.busy) return;
+    cancelDragSelection();
     const from = state.lastRowIndex == null ? index : state.lastRowIndex;
     const start = Math.min(from, index);
     const end = Math.max(from, index);
-    let added = 0;
+    const rows = [];
     for (let i = start; i <= end; i++) {
       const row = getRow(i);
-      if (row && row.deletable) {
-        addSelection(row);
-        added++;
-      }
+      if (!row) { toast("範囲に未読み込みの項目があります。スクロールして読み込んでから再選択してください", true); return; }
+      rows.push(row);
     }
+    rows.forEach(addSelection);
     state.lastRowIndex = index;
     updateSelectionUI();
     renderRows();
-    if (added === 0) toast("範囲内に選択可能な削除候補がありません");
+
   }
 
   const DRAG_EDGE = 28;
@@ -858,7 +869,7 @@
         continue;
       }
       drag.visited.add(i);
-      if (row.deletable && applyDragRow(row, drag.mode)) changed = true;
+      if (applyDragRow(row, drag.mode)) changed = true;
     }
     if (lastPending >= 0) {
       ensurePages(Math.floor(firstPending / PAGE_SIZE), Math.floor(lastPending / PAGE_SIZE));
@@ -886,7 +897,7 @@
       drag.pending.delete(index);
       if (drag.visited.has(index)) continue;
       drag.visited.add(index);
-      if (row.deletable && applyDragRow(row, drag.mode)) changed = true;
+      if (applyDragRow(row, drag.mode)) changed = true;
     }
     if (remaining && state.total > 0) {
       for (const index of Array.from(drag.pending)) {
@@ -1016,7 +1027,7 @@
     if (!rowElement) return;
     const index = Number(rowElement.dataset.index);
     const row = getRow(index);
-    if (!row || !row.deletable) return;
+    if (!row) return;
     event.preventDefault();
     state.pendingDragSelection = null;
     if (typeof rowsEl.setPointerCapture === "function" && event.pointerId != null) {
@@ -1053,43 +1064,47 @@
     });
     selectionInfo.textContent = "選択 " + state.selected.size + " 件 / " + fmtBytes(bytes);
     selectionInfo.title = "選択は検索・フィルタを切り替えても保持されます。新しいスキャンで解除されます。";
-    deleteBtn.disabled = state.busy || state.selected.size === 0;
-    clearSelectionBtn.disabled = state.selected.size === 0;
+    deleteBtn.disabled = state.busy || state.selected.size === 0 || Array.from(state.selected.values()).some(item => !item.deletable);
+    el("discardBtn").disabled = state.busy || state.selected.size === 0;
+    clearSelectionBtn.disabled = state.busy || state.selected.size === 0;
+    rowsEl.querySelectorAll('input[data-role="select"]').forEach(input => { input.disabled = state.busy; });
+    el("triageActions").querySelectorAll("button").forEach(button => { button.disabled = state.busy || !state.selected.size; });
   }
 
   async function selectAllCandidates() {
     if (state.busy) return;
-    clearPendingDragSelection();
-    selectAllBtn.disabled = true;
+    cancelDragSelection();
+    state.busy = true; updateBusyUI(); updateSelectionUI();
+    const generation = state.generation;
     try {
-      const ids = await api("CandidateIDs", currentQuery(0, 0));
-      if (!ids || ids.length === 0) {
-        toast("現在の条件で選択できる削除候補がありません");
-        return;
+      const selected = [];
+      for (let offset = 0;; offset += PAGE_SIZE) {
+        const page = await api("GetRows", currentQuery(offset, PAGE_SIZE));
+        if (generation !== state.generation) throw new Error("一覧条件が変更されました");
+        if (page.triageError) throw new Error("整理状態の読み込みに失敗しました: " + page.triageError);
+        const rows = page.rows || [];
+        selected.push(...rows);
+        if (offset + rows.length >= page.total) break;
+        if (!rows.length) throw new Error("一覧が途中で終了しました");
       }
-      const options = await api("GetMoveOptions", ids);
-      state.selected.clear();
-      (options || [])
-        .filter((option) => option.defaultMethod)
-        .forEach((option) => {
-          const size = option.defaultMethod === "zip" ? option.zipSize : option.folderSize;
-          state.selected.set(option.id, {
-            id: option.id,
-            name: option.name,
-            size,
-            zipPath: option.zipPath,
-            folderPath: option.folderPath,
-          });
-        });
-      state.lastRowIndex = null;
-      updateSelectionUI();
-      renderRows();
-      toast(state.selected.size + " 件の削除候補を選択しました");
-    } catch (error) {
-      toast("選択に失敗しました: " + error.message, true);
-    } finally {
-      selectAllBtn.disabled = state.busy;
-    }
+      state.selected.clear(); selected.forEach(addSelection);
+      updateSelectionUI(); renderRows();
+      toast(state.selected.size + " 件を選択しました");
+    } catch (error) { toast("選択に失敗しました: " + error.message, true); }
+    finally { state.busy = false; updateBusyUI(); updateSelectionUI(); }
+  }
+
+  async function setTriage(value) {
+    if (state.busy || !state.selected.size) return;
+    cancelDragSelection();
+    const ids = Array.from(state.selected.keys());
+    state.busy = true; updateBusyUI(); updateSelectionUI();
+    let completed = 0;
+    try {
+      for (const id of ids) { await api("SetTriage", id, value); completed++; }
+      toast(completed + " 件の整理状態を更新しました");
+    } catch (error) { toast("整理状態の更新に失敗しました（更新済み " + completed + " 件）: " + error.message, true); }
+    finally { state.busy = false; updateBusyUI(); updateSelectionUI(); reloadRows(false); if (state.activeId) showDetail(state.activeId); }
   }
 
   // ---------- summary / warnings ----------
@@ -1466,7 +1481,7 @@
     }
     html += renderAISection(item);
     html +=
-      '<div class="detail-note">ZIPと解凍済みフォルダのいずれか、または両方をWindowsのごみ箱へ移動できます。完全削除へのフォールバックは行いません。ZIPとフォルダの両方の移動は、最後のローカルコピーを失う可能性があります。</div>';
+      '<div class="detail-note">ここからは解凍済みフォルダのみをごみ箱へ移動できます。ZIPを破棄するには、項目を「破棄」と判定して専用の破棄操作をご利用ください。完全削除へのフォールバックは行いません。</div>';
     detailPane.innerHTML = html;
     renderPreviewSection();
   }
@@ -1937,6 +1952,46 @@
     }
   }
 
+  async function beginDiscard() {
+    if (state.busy || !state.selected.size) return;
+    cancelDragSelection();
+    const ids = Array.from(state.selected.keys());
+    state.busy = true; updateBusyUI(); updateSelectionUI();
+    try {
+      const preview = await api("PreviewDiscard", ids);
+      if (!window.Triage.validDiscardPreview(preview)) throw new Error("全対象のフルパスを確認できません");
+      openModal({
+        title: "破棄対象の最終確認", wide: true,
+        body: '<p class="modal-note">以下のすべてのパスをWindowsのごみ箱へ移動します。最後のコピーが失われる可能性があります。</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>',
+        actions: [
+          {label: "キャンセル", className: "btn", onClick: closeModal},
+          {label: "ごみ箱に移動", className: "btn danger", onClick: () => executeDiscard(preview.token)}
+        ]
+      });
+    } catch (error) { toast("破棄対象の確認に失敗しました: " + error.message, true); }
+    finally { state.busy = false; updateBusyUI(); updateSelectionUI(); }
+  }
+
+  async function executeDiscard(token) {
+    if (state.busy) return;
+    state.busy = true; state.deleting = true; updateBusyUI(); updateSelectionUI();
+    openModal({title:"ごみ箱に移動しています", body:"処理中です。", actions:[], closable:false});
+    try {
+      const results = await api("RecycleDiscard", token, true);
+      if (!Array.isArray(results)) throw new Error("処理結果を確認できません");
+      const body = '<ul class="move-targets">' + results.map(result => '<li>' + esc(result.path) + ' — ' + (result.success ? '成功' + (result.reason ? '（警告: ' + esc(result.reason) + '）' : '') : '失敗: ' + esc(result.reason || '理由不明')) + '</li>').join('') + '</ul>';
+      state.selected.clear();
+      state.deleting = false;
+      openModal({title:"ごみ箱移動の結果", body, wide:true, actions:[{label:"閉じる", className:"btn", onClick:closeModal}]});
+    } catch (error) {
+      state.deleting = false;
+      openModal({title:"ごみ箱移動の失敗", body:'<p class="result-fail">' + esc(error.message) + '</p>', actions:[{label:"閉じる", className:"btn", onClick:closeModal}]});
+    } finally {
+      state.deleting = false; state.busy = false; updateBusyUI(); updateSelectionUI(); reloadRows(false);
+    }
+  }
+  // ---------- discard end ----------
+
   // ---------- delete ----------
 
   function moveKindLabel(kind) {
@@ -1956,7 +2011,7 @@
   }
 
   async function beginDelete() {
-    if (state.busy || state.selected.size === 0) return;
+    if (state.busy || state.selected.size === 0 || Array.from(state.selected.values()).some(item => !item.deletable)) return;
     clearPendingDragSelection();
     const ids = Array.from(state.selected.keys());
     state.busy = true;
@@ -1971,7 +2026,7 @@
       state.moveOptions = options;
       state.moveMethods = new Map();
       options.forEach((option) => {
-        if (option.defaultMethod) state.moveMethods.set(option.id, option.defaultMethod);
+        if (option.canFolder) state.moveMethods.set(option.id, "folder");
       });
       state.movePreview = null;
       state.moveRequests = [];
@@ -1990,7 +2045,7 @@
     const cards = options
       .map((option) => {
         const method = state.moveMethods.get(option.id) || "";
-        const targets = option.targets || [];
+        const targets = targetsForOption(option, "folder");
         const targetRows = targets
           .map(
             (target) =>
@@ -2032,8 +2087,6 @@
             : '<p class="result-fail">移動できる既存パスがありません。</p>') +
           '<div class="move-choices">' +
           radio("folder", "解凍済みフォルダのみ", !option.canFolder, "") +
-          radio("zip", "アーカイブのみ", !option.canZip, "") +
-          radio("both", "アーカイブとフォルダの両方（危険）", !option.canBoth, "danger") +
           "</div>" +
           (option.warning ? '<p class="move-warning">' + esc(option.warning) + "</p>" : "") +
           "</div>"
@@ -2041,11 +2094,11 @@
       })
       .join("");
     const body =
-      '<p class="muted">移動する対象を項目ごとに選択してください。ZIPとフォルダの両方を移動すると、最後のローカルコピーを失う可能性があります。</p>' +
+      '<p class="muted">この操作では解凍済みフォルダのみ移動できます。ZIPを破棄するには、項目を「破棄」と判定し、「破棄と判定した選択項目をごみ箱へ」を使用してください。</p>' +
       '<div class="move-list">' +
       cards +
       "</div>" +
-      '<div id="moveBothWarning" class="modal-note hidden">ZIPとフォルダの両方を移動する項目があります。この操作は転送を行わず、最後のローカルコピーを失う可能性があります。次の最終確認でも明示的に承認してください。</div>' +
+
       '<div id="moveSummary" class="transfer-selection-summary"></div>';
     openModal({
       title: "ごみ箱へ移動する対象を選択",
@@ -2064,7 +2117,7 @@
     let valid = true;
     for (const option of state.moveOptions || []) {
       const method = state.moveMethods.get(option.id) || "";
-      if (!method) {
+      if (method !== "folder" || !option.canFolder) {
         valid = false;
         continue;
       }
@@ -2114,6 +2167,7 @@
     if (confirm) confirm.disabled = true;
     try {
       const preview = await api("PreviewMove", requests);
+      if (!window.Triage.validPreview(preview, requests)) throw new Error("全対象のフルパスを確認できません");
       state.movePreview = preview;
       state.moveRequests = requests;
       showMoveFinalDialog(preview, requests);
@@ -2362,6 +2416,10 @@
     transferBtn.disabled = true;
     try {
       const review = await api("GetTransferReview");
+      if (review && Array.isArray(review.candidates) && review.candidates.some(candidate => !Object.prototype.hasOwnProperty.call(candidate, "triage"))) {
+        throw new Error("保存状態を転送候補で確認できません。対応するバックエンドが必要です。");
+      }
+      if (review && Array.isArray(review.candidates)) review.candidates = window.Triage.savedCandidates(review.candidates);
       if (!review || !Array.isArray(review.candidates) || review.candidates.length === 0) {
         toast("転送できるZIPまたはフォルダがありません");
         return;
@@ -2391,7 +2449,7 @@
       groups.review.filter((candidate) => candidate.selected && candidate.exists).map((candidate) => candidate.id)
     );
     openModal({
-      title: "残ったデータをmulti-drive-copyへ引き渡す",
+      title: "保存したデータをmulti-drive-copyへ引き渡す",
       wide: true,
       body: transferReviewBody(review),
       actions: [
@@ -2414,7 +2472,7 @@
     const recommendedExisting = groups.recommended.filter((candidate) => candidate.exists);
     let html =
       '<div class="stat-row">' +
-      '<div class="stat"><div class="stat-label">転送候補</div><div class="stat-value">' + groups.recommended.length + groups.review.length + "</div></div>" +
+      '<div class="stat"><div class="stat-label">転送候補</div><div class="stat-value">' + (groups.recommended.length + groups.review.length) + "</div></div>" +
       '<div class="stat"><div class="stat-label">推奨（ZIP優先）</div><div class="stat-value result-ok">' + recommendedExisting.length + "</div></div>" +
       '<div class="stat"><div class="stat-label">要確認</div><div class="stat-value">' + groups.review.length + "</div></div>" +
       '<div class="stat"><div class="stat-label">パス消失</div><div class="stat-value result-fail">' + review.missingCount + "</div></div>" +
@@ -2622,6 +2680,7 @@
   // ---------- busy ----------
 
   function updateBusyUI() {
+    if (state.busy && (state.dragSelect || state.pendingDragSelection)) cancelDragSelection();
     scanBtn.disabled = state.busy || state.roots.length === 0;
     const rescanBtn = el("rescanBtn");
     if (rescanBtn) rescanBtn.disabled = state.busy || state.roots.length === 0;
@@ -2631,11 +2690,12 @@
     rootInput.disabled = state.busy;
     selectAllBtn.disabled = state.busy;
     transferBtn.disabled = state.busy;
-    deleteBtn.disabled = state.busy || state.selected.size === 0;
-    clearSelectionBtn.disabled = state.selected.size === 0;
+    deleteBtn.disabled = state.busy || state.selected.size === 0 || Array.from(state.selected.values()).some(item => !item.deletable);
+    clearSelectionBtn.disabled = state.busy || state.selected.size === 0;
     rootList.querySelectorAll("button").forEach((button) => {
       button.disabled = state.busy;
     });
+    updateSelectionUI();
   }
 
   function updateSortIndicators() {
@@ -2724,6 +2784,8 @@
       updateBusyUI();
     });
 
+    el("triageFilter").addEventListener("change", event => { state.triageFilter = event.target.value; reloadRows(true); });
+    el("triageActions").addEventListener("click", event => { const button = event.target.closest("[data-triage]"); if (button && !button.disabled) setTriage(button.dataset.triage); });
     filterBar.addEventListener("click", (event) => {
       const button = event.target.closest("[data-filter]");
       if (!button) return;
@@ -2775,6 +2837,7 @@
     rowsEl.addEventListener("pointerdown", startDragSelection);
 
     rowsEl.addEventListener("click", (event) => {
+      if (state.busy && event.target.matches('input[type="checkbox"]')) { event.preventDefault(); return; }
       if (state.dragSelect || performance.now() < state.suppressRowClickUntil) {
         state.suppressRowClickUntil = 0;
         if (event.target.matches && event.target.matches('input[type="checkbox"]')) event.preventDefault();
@@ -2800,6 +2863,8 @@
       if (!event.target.matches('input[type="checkbox"]')) return;
       const id = event.target.dataset.id;
       if (!id) return;
+      if (state.busy) { event.target.checked = state.selected.has(id); return; }
+      clearPendingDragSelection();
       if (state.dragSelect || performance.now() < state.suppressCheckboxChangeUntil) {
         state.suppressCheckboxChangeUntil = 0;
         event.target.checked = state.selected.has(id);
@@ -2925,6 +2990,8 @@
 
     selectAllBtn.addEventListener("click", selectAllCandidates);
     clearSelectionBtn.addEventListener("click", () => {
+      if (state.busy) return;
+      cancelDragSelection();
       state.selected.clear();
       clearPendingDragSelection();
       state.lastRowIndex = null;
@@ -2938,6 +3005,7 @@
     if (exportJsonBtn) exportJsonBtn.addEventListener("click", () => exportReport("json", exportJsonBtn));
     transferBtn.addEventListener("click", openTransferReview);
     deleteBtn.addEventListener("click", beginDelete);
+    el("discardBtn").addEventListener("click", beginDiscard);
     warningBadge.addEventListener("click", showWarnings);
     modalClose.addEventListener("click", closeModal);
     modalBody.addEventListener("change", (event) => {
@@ -2989,6 +3057,8 @@
     });
 
     document.addEventListener("keydown", (event) => {
+      const decision = window.Triage.shortcut(event);
+      if (decision && modal.classList.contains("hidden") && !state.busy && state.selected.size) { event.preventDefault(); setTriage(decision); return; }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
         event.preventDefault();
         searchInput.focus();

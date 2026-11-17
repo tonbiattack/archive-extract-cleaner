@@ -1769,3 +1769,7 @@ input[type="checkbox"]:disabled {
     flex-basis: 240px;
   }
 }
+
+.triage-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.triage-badge { flex: 0 0 auto; margin-left: 6px; padding: 2px 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-size: 10px; }
+.toolbar-actions { flex-wrap: wrap; }

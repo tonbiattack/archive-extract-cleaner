@@ -23,6 +23,7 @@
       </div>
     </header>
 
+    <div id="upperRegion" class="upper-region">
     <section class="roots-panel">
       <div class="panel-label">
         <span>対象フォルダ</span>
@@ -62,6 +63,7 @@
         <button class="filter" data-filter="keep">保持</button>
       </div>
       <div class="toolbar-actions">
+        <label class="row-height-control">行の高さ <input id="rowHeight" type="range" min="24" max="64" step="1" aria-label="行の高さ"> <output id="rowHeightValue"></output></label>
         <button id="resetColumnsBtn" class="btn">列幅リセット</button>
         <button id="exportCsvBtn" class="btn">CSV書き出し</button>
         <button id="exportJsonBtn" class="btn">JSON書き出し</button>
@@ -103,6 +105,8 @@
       <span id="workflowCurrent" class="workflow-current"></span>
     </section>
 
+    </div>
+    <div id="upperSplitter" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="上部領域の高さ" aria-controls="upperRegion" class="upper-splitter" title="ドラッグまたは上下キーで高さを変更"></div>
     <main class="content">
       <div class="table-wrap">
         <div id="tableScroll" class="table-scroll">
@@ -165,6 +169,7 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <script src="layout.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

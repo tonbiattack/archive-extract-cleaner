@@ -411,6 +411,8 @@
     });
     const reveal = contextMenu.querySelector('[data-menu-action="reveal"]');
     if (reveal) reveal.disabled = !row.zipPath && !row.folderPath;
+    const recycle = contextMenu.querySelector('[data-menu-action="recycle-selected"]');
+    if (recycle) recycle.disabled = state.busy || state.selected.size === 0;
     contextMenu.classList.remove("hidden");
     const rect = contextMenu.getBoundingClientRect();
     let left = event.clientX;
@@ -1953,22 +1955,24 @@
   }
 
   async function beginDiscard() {
-    if (state.busy || !state.selected.size) return;
+    const selection = Array.isArray(arguments[0]) ? arguments[0] : null;
+    if (state.busy || !(selection ? selection.length : state.selected.size)) return;
     cancelDragSelection();
-    const ids = Array.from(state.selected.keys());
+    const ids = selection ? selection.map(item => item.id) : Array.from(state.selected.keys());
     state.busy = true; updateBusyUI(); updateSelectionUI();
     try {
       const preview = await api("PreviewDiscard", ids);
       if (!window.Triage.validDiscardPreview(preview)) throw new Error("全対象のフルパスを確認できません");
+      if (!Number.isInteger(preview.itemCount) || preview.itemCount !== ids.length || !Number.isInteger(preview.targetCount) || preview.targetCount !== preview.paths.length || !Number.isFinite(preview.bytes) || preview.bytes < 0) throw new Error("選択件数、対象件数またはサイズを確認できません。再スキャンしてください。");
       openModal({
         title: "破棄対象の最終確認", wide: true,
-        body: '<p class="modal-note">以下のすべてのパスをWindowsのごみ箱へ移動します。最後のコピーが失われる可能性があります。</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>',
+        body: '<p>対象 ' + preview.itemCount + ' 項目 / ' + preview.targetCount + ' 件 / ' + esc(fmtBytes(preview.bytes)) + '</p><p class="modal-note">以下のすべてのパスをWindowsのごみ箱へ移動します。最後のコピーが失われる可能性があります。</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>',
         actions: [
           {label: "キャンセル", className: "btn", onClick: closeModal},
-          {label: "ごみ箱に移動", className: "btn danger", onClick: () => executeDiscard(preview.token)}
+          {label: "確認を続ける", className: "btn danger", onClick: () => openModal({title:"アーカイブ破棄の追加確認", wide:true, body:'<p>アーカイブを含む破棄対象を移動すると、最後のコピーが失われる可能性があります。全パスを確認し、破棄することに同意しますか？</p><p>対象 ' + preview.itemCount + ' 項目 / ' + preview.targetCount + ' 件 / ' + esc(fmtBytes(preview.bytes)) + '</p><ul class="move-targets">' + preview.paths.map(path => '<li>' + esc(path) + '</li>').join('') + '</ul>', actions:[{label:"キャンセル", onClick:closeModal}, {label:"同意してごみ箱に移動", className:"btn danger", onClick:() => executeDiscard(preview.token)}]})}
         ]
       });
-    } catch (error) { toast("破棄対象の確認に失敗しました: " + error.message, true); }
+    } catch (error) { toast("破棄対象の確認に失敗しました（全選択項目は処理されません）: " + (error.message || String(error)), true); }
     finally { state.busy = false; updateBusyUI(); updateSelectionUI(); }
   }
 
@@ -2010,17 +2014,29 @@
     return [];
   }
 
+  function beginContextRecycle() {
+    if (state.busy || !state.selected.size) return;
+    cancelDragSelection();
+    const selection = Array.from(state.selected, ([id, item]) => ({id, name: item.name, deletable: item.deletable}));
+    const blocked = selection.filter(item => !item.deletable);
+    const details = blocked.length ? '<p class="result-fail">フォルダ整理は全選択項目が検証済みである必要があります。対象外:</p><ul>' + blocked.map(item => '<li>' + esc(item.name || item.id) + ' — 安全なフォルダ整理の条件を満たしていません</li>').join('') + '</ul>' : '';
+    openModal({title:"選択項目のごみ箱移動", wide:true,
+      body:'<p>チェック済みの ' + selection.length + ' 項目が対象です。右クリックした行ではなく選択項目を処理します。</p><p>フォルダ整理は検証済みフォルダのみ。破棄は「破棄」と判定済みの項目のアーカイブとフォルダを対象にします。混在する選択は分けてください。</p>' + details,
+      actions:[{label:"キャンセル",onClick:closeModal}, {label:"検証済みフォルダを整理",disabled:blocked.length > 0,onClick:() => beginDelete(selection)}, {label:"破棄と判定した項目を処理",className:"btn danger",onClick:() => beginDiscard(selection)}]});
+  }
+
   async function beginDelete() {
-    if (state.busy || state.selected.size === 0 || Array.from(state.selected.values()).some(item => !item.deletable)) return;
+    const selection = Array.isArray(arguments[0]) ? arguments[0] : Array.from(state.selected, ([id, item]) => ({id, deletable:item.deletable}));
+    if (state.busy || selection.length === 0 || selection.some(item => !item.deletable)) return;
     clearPendingDragSelection();
-    const ids = Array.from(state.selected.keys());
+    const ids = selection.map(item => item.id);
     state.busy = true;
     updateBusyUI();
     setStatus("移動方法を確認しています...");
     try {
       const options = await api("GetMoveOptions", ids);
-      if (!Array.isArray(options) || options.length === 0) {
-        toast("移動できる項目がありません。再スキャンしてください。", true);
+      if (!Array.isArray(options) || options.length !== ids.length || ids.some(id => options.filter(option => option.id === id).length !== 1)) {
+        toast("選択項目の一部が見つからないか重複しています。再スキャンしてください。", true);
         return;
       }
       state.moveOptions = options;
@@ -2032,7 +2048,7 @@
       state.moveRequests = [];
       showMoveMethodDialog();
     } catch (error) {
-      toast("移動方法の取得に失敗しました: " + error.message, true);
+      toast("移動方法の取得に失敗しました: " + (error.message || String(error)), true);
     } finally {
       state.busy = false;
       updateBusyUI();
@@ -2910,6 +2926,11 @@
         return;
       }
       const actionButton = event.target.closest("[data-menu-action]");
+      if (actionButton && actionButton.dataset.menuAction === "recycle-selected") {
+        hideContextMenu();
+        beginContextRecycle();
+        return;
+      }
       if (actionButton && actionButton.dataset.menuAction === "reveal") {
         const row = state.contextRow;
         hideContextMenu();

@@ -61,6 +61,9 @@ type App struct {
 	scanStore            *cache.ScanStore
 	lastCacheStats       engine.CacheStats
 	moves                dashboard.Moves
+	triagePath           string
+	discardPreview       *discardSnapshot
+	triageDisplay        map[string]triageDisplayEntry
 }
 
 type ScanInfo struct {
@@ -244,11 +247,43 @@ func (a *App) aiStateLocked() AIState {
 	}
 }
 
+func (a *App) safeTransferReviewLocked(busy bool) transfer.Review {
+	decisions, err := readTriage(a.triageFile())
+	var saved, protected []model.Item
+	for _, item := range a.items {
+		if err == nil && triageState(item, a.roots, decisions) == "save" {
+			saved = append(saved, item)
+		} else {
+			protected = append(protected, item)
+		}
+	}
+	review := transfer.BuildReview(saved, a.multiDriveCopyScript, a.multiDriveCopyPreset, busy)
+	candidates := review.Candidates[:0]
+	for _, candidate := range review.Candidates {
+		unsafe := false
+		for _, item := range protected {
+			for _, p := range append([]string{item.ZipPath, item.FolderPath}, item.RelatedFolders...) {
+				if p != "" && (winpath.EqualPath(candidate.Path, p) || winpath.IsWithin(candidate.Path, p)) {
+					unsafe = true
+				}
+			}
+		}
+		if !unsafe {
+			candidates = append(candidates, candidate)
+		}
+	}
+	review.Candidates = candidates
+	return review
+}
+
 func (a *App) GetTransferReview() transfer.Review {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	items := append([]model.Item(nil), a.items...)
-	return transfer.BuildReview(items, a.multiDriveCopyScript, a.multiDriveCopyPreset, a.scanning || a.deleting)
+	review := a.safeTransferReviewLocked(a.scanning || a.deleting)
+	for i := range review.Candidates {
+		review.Candidates[i].Triage = "save"
+	}
+	return review
 }
 
 func (a *App) LaunchMultiDriveCopy(paths []string) (transfer.LaunchResult, error) {
@@ -257,8 +292,12 @@ func (a *App) LaunchMultiDriveCopy(paths []string) (transfer.LaunchResult, error
 	if a.scanning || a.deleting {
 		return transfer.LaunchResult{}, errors.New("スキャンまたはごみ箱移動の処理中は転送を開始できません")
 	}
-	items := append([]model.Item(nil), a.items...)
-	review := transfer.BuildReview(items, a.multiDriveCopyScript, a.multiDriveCopyPreset, false)
+	unlock, err := lockTriage(a.triageFile())
+	if err != nil {
+		return transfer.LaunchResult{}, err
+	}
+	defer unlock()
+	review := a.safeTransferReviewLocked(false)
 	allowed := make(map[string]transfer.Candidate, len(review.Candidates))
 	for _, candidate := range review.Candidates {
 		allowed[winpath.Key(candidate.Path)] = candidate
@@ -325,6 +364,7 @@ func (a *App) scan(roots []string, full bool) (ScanInfo, error) {
 	ctx, cancel := context.WithCancel(base)
 	a.cancelScan = cancel
 	a.scanning = true
+	a.discardPreview = nil
 	limits := a.limits
 	workers := a.workers
 	hashes := a.archiveHashes
@@ -401,6 +441,7 @@ func (a *App) scan(roots []string, full bool) (ScanInfo, error) {
 		index[item.ID] = i
 	}
 	a.mu.Lock()
+	a.triageDisplay = nil
 	a.items = result.Items
 	a.index = index
 	a.roots = result.Roots
@@ -451,16 +492,32 @@ func (a *App) CancelScan() {
 }
 
 func (a *App) GetRows(query RowQuery) RowPage {
-	a.mu.RLock()
+	a.mu.Lock()
 	items := append([]model.Item(nil), a.items...)
 	summary := a.summary
 	warnings := append([]string(nil), a.warnings...)
 	warningTotal := a.warningTotal
 	roots := append([]string(nil), a.roots...)
 	moves := a.moves
-	a.mu.RUnlock()
+	triagePath := a.triageFile()
+	a.mu.Unlock()
 
+	decisions, triageErr := readTriage(triagePath)
+	triageError := ""
+	if triageErr != nil {
+		triageError = triageErr.Error()
+	}
+	states := a.advisoryTriageStates(items, roots, decisions)
 	filtered := filterItems(items, query)
+	if query.Triage != "" && query.Triage != "all" {
+		out := filtered[:0]
+		for _, item := range filtered {
+			if states[item.ID] == query.Triage {
+				out = append(out, item)
+			}
+		}
+		filtered = out
+	}
 	sortItems(filtered, query.Sort, query.Desc)
 
 	total := len(filtered)
@@ -484,11 +541,14 @@ func (a *App) GetRows(query RowQuery) RowPage {
 	}
 	rows := make([]Row, 0, end-offset)
 	for _, item := range filtered[offset:end] {
-		rows = append(rows, toRow(item))
+		row := toRow(item)
+		row.Triage = states[item.ID]
+		rows = append(rows, row)
 	}
 	// ダッシュボードはスキャン全体の値。一覧の絞り込みとは独立させる。
 	filteredView := len(filtered) != len(items)
 	return RowPage{
+		TriageError:  triageError,
 		Rows:         rows,
 		Total:        total,
 		Offset:       offset,
@@ -513,8 +573,23 @@ func (a *App) GetItemDetail(id string) (model.Item, error) {
 func (a *App) CandidateIDs(query RowQuery) []string {
 	a.mu.RLock()
 	items := append([]model.Item(nil), a.items...)
+	roots := append([]string(nil), a.roots...)
+	triagePath := a.triageFile()
 	a.mu.RUnlock()
 	filtered := filterItems(items, query)
+	if query.Triage != "" && query.Triage != "all" {
+		decisions, err := readTriage(triagePath)
+		if err != nil {
+			return []string{}
+		}
+		out := filtered[:0]
+		for _, item := range filtered {
+			if triageState(item, roots, decisions) == query.Triage {
+				out = append(out, item)
+			}
+		}
+		filtered = out
+	}
 	sortItems(filtered, query.Sort, query.Desc)
 	ids := make([]string, 0, len(filtered))
 	for _, item := range filtered {

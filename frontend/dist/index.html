@@ -62,13 +62,17 @@
         <button class="filter" data-filter="unverified">未検証</button>
         <button class="filter" data-filter="keep">保持</button>
       </div>
+      <label>整理状態 <select id="triageFilter" aria-label="整理状態で絞り込み"><option value="all">すべて</option><option value="unjudged">未判定</option><option value="save">保存</option><option value="discard">破棄</option><option value="hold">保留</option></select></label>
+      <div id="triageActions" class="triage-actions" role="group" aria-label="選択項目の整理状態">
+        <button class="btn" data-triage="save">保存 (S)</button><button class="btn" data-triage="discard">破棄 (D)</button><button class="btn" data-triage="hold">保留 (H)</button><button class="btn" data-triage="unjudged">未判定に戻す</button>
+      </div>
       <div class="toolbar-actions">
         <label class="row-height-control">行の高さ <input id="rowHeight" type="range" min="24" max="64" step="1" aria-label="行の高さ"> <output id="rowHeightValue"></output></label>
         <button id="resetColumnsBtn" class="btn">列幅リセット</button>
         <button id="exportCsvBtn" class="btn">CSV書き出し</button>
         <button id="exportJsonBtn" class="btn">JSON書き出し</button>
-        <button id="transferBtn" class="btn">残ったデータをE/F/Gへコピー</button>
-        <button id="selectAllBtn" class="btn">候補を全選択</button>
+        <button id="transferBtn" class="btn">保存したデータをE/F/Gへコピー</button>
+        <button id="selectAllBtn" class="btn">表示条件の全項目を選択</button>
         <button id="clearSelectionBtn" class="btn">選択解除</button>
       </div>
     </section>
@@ -142,6 +146,7 @@
       <div id="statusText" class="status-text">待機中</div>
       <div class="status-right">
         <span id="selectionInfo" class="selection-info">選択 0 件</span>
+        <button id="discardBtn" class="btn danger" disabled>破棄と判定した選択項目をごみ箱へ</button>
         <button id="deleteBtn" class="btn danger" disabled>選択項目をごみ箱に移動</button>
       </div>
     </footer>
@@ -170,6 +175,7 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="layout.js"></script>
+  <script src="triage.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

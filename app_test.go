@@ -17,6 +17,7 @@ import (
 func newTestApp(t *testing.T) *App {
 	t.Helper()
 	app := NewApp()
+	app.triagePath = filepath.Join(t.TempDir(), "triage.json")
 	app.log = oplog.New(filepath.Join(t.TempDir(), "operations.jsonl"))
 	app.logPath = app.log.Path()
 	app.limits = model.DefaultLimits()
@@ -211,16 +212,15 @@ func TestAppPreviewZipAndFolder(t *testing.T) {
 		t.Fatalf("folder entries = %+v", folderPreview.Entries)
 	}
 
-	app.mover = func(path string) error { return os.RemoveAll(path) }
-	if _, err := app.DeleteSelected([]MoveRequest{{ID: ids[0], Method: MoveMethodZip}}, true); err != nil {
+	if _, err := app.DeleteSelected([]MoveRequest{{ID: ids[0], Method: MoveMethodFolder}}, true); err != nil {
 		t.Fatal(err)
 	}
-	unavailable := app.GetPreview(ids[0], "zip")
-	if unavailable.Error == "" || unavailable.Source != "zip" {
+	unavailable := app.GetPreview(ids[0], "folder")
+	if unavailable.Error == "" || unavailable.Source != "folder" {
 		t.Fatalf("unavailable preview = %+v", unavailable)
 	}
 	remaining := app.GetPreview(ids[0], "")
-	if remaining.Error != "" || remaining.Source != "folder" {
+	if remaining.Error != "" || remaining.Source != "zip" {
 		t.Fatalf("remaining preview = %+v", remaining)
 	}
 }
@@ -234,7 +234,7 @@ func previewHasPath(entries []preview.Entry, path string) bool {
 	return false
 }
 
-func TestAppMoveZipOnly(t *testing.T) {
+func TestLegacyZipAndBothDeletionRejected(t *testing.T) {
 	root := t.TempDir()
 	zipPath := filepath.Join(root, "photos.zip")
 	folder := filepath.Join(root, "photos")
@@ -249,148 +249,57 @@ func TestAppMoveZipOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
-	requests := []MoveRequest{{ID: ids[0], Method: MoveMethodZip}}
-	preview, err := app.PreviewMove(requests)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if preview.TargetCount != 1 || preview.Items[0].Targets[0].Kind != "zip" {
-		t.Fatalf("preview = %+v", preview)
-	}
-	response, err := app.DeleteSelected(requests, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.Succeeded != 1 || response.Partial != 0 || response.Failed != 0 {
-		t.Fatalf("response = %+v", response)
-	}
-	if _, err := os.Stat(zipPath); !os.IsNotExist(err) {
-		t.Fatalf("zip still exists: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(folder, "a.txt")); err != nil {
-		t.Fatalf("folder was removed: %v", err)
-	}
-	row := app.GetRows(RowQuery{Filter: "all"}).Rows[0]
-	if row.Verdict != string(model.VerdictKeepDirectory) || !row.ZipMoved || row.FolderMoved || row.Deletable {
-		t.Fatalf("row = %+v", row)
-	}
-	review := app.GetTransferReview()
-	if len(review.Candidates) != 1 || review.Candidates[0].Kind != "folder" || review.Candidates[0].Path != folder {
-		t.Fatalf("transfer review = %+v", review)
-	}
-}
-
-func TestAppMoveBothToRecycleBin(t *testing.T) {
-	root := t.TempDir()
-	zipPath := filepath.Join(root, "photos.zip")
-	folder := filepath.Join(root, "photos")
-	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
-		t.Fatal(err)
-	}
-	app := newTestApp(t)
-	if _, err := app.Scan([]string{root}); err != nil {
-		t.Fatal(err)
-	}
-	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
-	options := app.GetMoveOptions(ids)
-	if len(options) != 1 || !options[0].CanBoth {
-		t.Fatalf("options = %+v", options)
-	}
-	requests := []MoveRequest{{ID: ids[0], Method: MoveMethodBoth}}
-	preview, err := app.PreviewMove(requests)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if preview.TargetCount != 2 {
-		t.Fatalf("preview = %+v", preview)
-	}
-	response, err := app.DeleteSelected(requests, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.Succeeded != 1 {
-		t.Fatalf("response = %+v", response)
-	}
-	if _, err := os.Lstat(zipPath); !os.IsNotExist(err) {
-		t.Fatalf("zip still exists: %v", err)
-	}
-	if _, err := os.Lstat(folder); !os.IsNotExist(err) {
-		t.Fatalf("folder still exists: %v", err)
-	}
-	row := app.GetRows(RowQuery{Filter: "all"}).Rows[0]
-	if row.Status != string(model.StatusDeleted) || !row.ZipMoved || !row.FolderMoved || row.Deletable {
-		t.Fatalf("row = %+v", row)
-	}
-	if review := app.GetTransferReview(); len(review.Candidates) != 0 {
-		t.Fatalf("transfer review = %+v", review)
-	}
-}
-
-func TestAppMovePartialFailureAndRetry(t *testing.T) {
-	root := t.TempDir()
-	zipPath := filepath.Join(root, "photos.zip")
-	folder := filepath.Join(root, "photos")
-	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
-		t.Fatal(err)
-	}
-	app := newTestApp(t)
-	if _, err := app.Scan([]string{root}); err != nil {
-		t.Fatal(err)
-	}
-	app.mover = func(path string) error {
-		if strings.HasSuffix(strings.ToLower(path), ".zip") {
-			return errors.New("zip is locked")
+	for _, method := range []MoveMethod{MoveMethodZip, MoveMethodBoth} {
+		requests := []MoveRequest{{ID: ids[0], Method: method}}
+		if _, err := app.PreviewMove(requests); err != nil {
+			t.Fatal(err)
 		}
-		return os.RemoveAll(path)
+		if _, err := app.DeleteSelected(requests, true); err == nil {
+			t.Fatalf("legacy %s accepted", method)
+		}
+		if _, err := os.Stat(zipPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(folder); err != nil {
+			t.Fatal(err)
+		}
 	}
-	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
-	requests := []MoveRequest{{ID: ids[0], Method: MoveMethodBoth}}
-	response, err := app.DeleteSelected(requests, true)
-	if err != nil {
+}
+
+func TestAppFolderFailureAndRetry(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "photos.zip")
+	folder := filepath.Join(root, "photos")
+	if err := testutil.WriteZip(zipPath, []testutil.Entry{{Name: "photos/a.txt", Content: "alpha"}}); err != nil {
 		t.Fatal(err)
 	}
-	if response.Partial != 1 || response.Succeeded != 0 || response.Failed != 0 {
-		t.Fatalf("response = %+v", response)
+	if err := testutil.WriteFile(folder, "a.txt", "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	app := newTestApp(t)
+	if _, err := app.Scan([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	ids := app.CandidateIDs(RowQuery{Filter: "candidate"})
+	requests := []MoveRequest{{ID: ids[0], Method: MoveMethodFolder}}
+	app.mover = func(string) error { return errors.New("folder locked") }
+	response, err := app.DeleteSelected(requests, true)
+	if err != nil || response.Failed != 1 {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	if _, err := os.Stat(folder); err != nil {
+		t.Fatal(err)
+	}
+	app.mover = func(path string) error { return os.RemoveAll(path) }
+	response, err = app.DeleteSelected(requests, true)
+	if err != nil || response.Succeeded != 1 {
+		t.Fatalf("response=%+v err=%v", response, err)
 	}
 	if _, err := os.Stat(folder); !os.IsNotExist(err) {
-		t.Fatalf("folder still exists: %v", err)
+		t.Fatalf("folder remains: %v", err)
 	}
 	if _, err := os.Stat(zipPath); err != nil {
-		t.Fatalf("zip was removed: %v", err)
-	}
-	row := app.GetRows(RowQuery{Filter: "all"}).Rows[0]
-	if row.Status != string(model.StatusError) || !row.FolderMoved || row.ZipMoved || !row.Deletable {
-		t.Fatalf("row = %+v", row)
-	}
-	options := app.GetMoveOptions(ids)
-	if len(options) != 1 || options[0].CanFolder || !options[0].CanZip || options[0].CanBoth {
-		t.Fatalf("retry options = %+v", options)
-	}
-	if review := app.GetTransferReview(); len(review.Candidates) != 1 || review.Candidates[0].Kind != "zip" {
-		t.Fatalf("transfer review = %+v", review)
-	}
-
-	app.mover = func(path string) error { return os.RemoveAll(path) }
-	retry := []MoveRequest{{ID: ids[0], Method: MoveMethodZip}}
-	response, err = app.DeleteSelected(retry, true)
-	if err != nil {
 		t.Fatal(err)
-	}
-	if response.Succeeded != 1 {
-		t.Fatalf("retry response = %+v", response)
-	}
-	if _, err := os.Stat(zipPath); !os.IsNotExist(err) {
-		t.Fatalf("zip still exists: %v", err)
-	}
-	row = app.GetRows(RowQuery{Filter: "all"}).Rows[0]
-	if row.Status != string(model.StatusDeleted) || !row.ZipMoved || !row.FolderMoved {
-		t.Fatalf("row after retry = %+v", row)
 	}
 }
 
@@ -414,6 +323,9 @@ func TestAppTransferReview(t *testing.T) {
 	}
 	app.multiDriveCopyScript = script
 	app.multiDriveCopyPreset = "Backup"
+	if err := app.SetTriage(app.items[0].ID, "save"); err != nil {
+		t.Fatal(err)
+	}
 
 	review := app.GetTransferReview()
 	if !review.ScriptAvailable || review.Preset != "Backup" {
@@ -447,13 +359,8 @@ func TestAppTransferReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	review = app.GetTransferReview()
-	if review.MissingCount != 1 {
-		t.Fatalf("missing count = %d, review = %+v", review.MissingCount, review.Candidates)
-	}
-	for _, candidate := range review.Candidates {
-		if candidate.Path == folder && (candidate.Exists || candidate.Selected || !candidate.Review) {
-			t.Fatalf("missing folder candidate = %+v", candidate)
-		}
+	if len(review.Candidates) != 0 {
+		t.Fatalf("stale saved item offered: %+v", review.Candidates)
 	}
 }
 

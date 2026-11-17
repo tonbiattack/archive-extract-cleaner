@@ -175,6 +175,13 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 	if len(requests) == 0 {
 		return MoveResponse{}, errors.New("移動対象が選択されていません")
 	}
+	// Archive disposal is exclusively authorized by the explicit discard preview.
+	// This legacy API permits only verified duplicate-folder cleanup.
+	for _, request := range requests {
+		if request.Method != MoveMethodFolder {
+			return MoveResponse{}, errors.New("ZIP disposal requires discard preview")
+		}
+	}
 	a.mu.Lock()
 	if a.deleting || a.scanning {
 		a.mu.Unlock()
@@ -199,6 +206,14 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		a.mu.Unlock()
 	}()
 
+	// Coordinate with discard across app instances before verifying either copy.
+	// Never recycle a folder if the shared lock cannot be acquired.
+	unlockTriage, err := lockTriage(a.triageFile())
+	if err != nil {
+		return MoveResponse{}, err
+	}
+	defer unlockTriage()
+
 	seen := map[string]struct{}{}
 	results := make([]MoveResult, 0, len(requests))
 	updates := map[string]model.Item{}
@@ -219,6 +234,23 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		}
 		item := items[indexInItems]
 		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(requests), Name: item.DisplayName(), Stage: "revalidating"})
+		unsafeFolder := item.ZipMoved || item.FolderMoved || item.ZipPath == "" || item.FolderPath == ""
+		for _, other := range items {
+			if other.ID == item.ID {
+				continue
+			}
+			for _, p := range append([]string{other.ZipPath, other.FolderPath}, other.RelatedFolders...) {
+				if p != "" && (winpath.EqualPath(item.FolderPath, p) || winpath.IsWithin(item.FolderPath, p) || winpath.IsWithin(p, item.FolderPath)) {
+					unsafeFolder = true
+				}
+			}
+		}
+		if unsafeFolder {
+			skipped++
+			moves.AddMoveResult(dashboard.MoveOutcome{Skipped: true, Bytes: item.Size})
+			results = append(results, MoveResult{ID: item.ID, Method: request.Method, Skipped: true, Reason: "archive unavailable or folder overlaps another item", LogPath: a.logPath})
+			continue
+		}
 		option := buildMoveOption(item)
 		targets, allowed := moveTargetsForMethod(option, request.Method)
 		if !allowed || len(targets) == 0 {
@@ -257,6 +289,18 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		}
 
 		logItem := item
+		// Capture a valid saved decision and the expected ZIP-only fingerprint before
+		// recycling. A stale decision or an unreadable store must never migrate.
+		var migrationFingerprint string
+		migrated := false
+		var decisions map[string]triageDecision
+		if request.Method == MoveMethodFolder && !item.ZipMoved && !item.FolderMoved {
+			decisions, _ = readTriage(a.triageFile())
+			if triageState(item, roots, decisions) == "save" {
+				zipOnly := model.Item{ID: model.MakeID(item.ZipPath, ""), ZipPath: item.ZipPath, Verdict: model.VerdictKeepArchive}
+				migrationFingerprint, _ = triageFingerprint(zipOnly, roots)
+			}
+		}
 		targetResults := make([]MoveTargetResult, 0, len(targets))
 		for _, target := range targets {
 			a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(requests), Name: item.DisplayName() + " / " + target.Kind, Stage: "recycling"})
@@ -285,6 +329,26 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 				anySuccess = true
 			} else {
 				allSuccess = false
+			}
+		}
+
+		if unlockTriage != nil {
+			if allSuccess && migrationFingerprint != "" {
+				zipOnly := model.Item{ID: model.MakeID(logItem.ZipPath, ""), ZipPath: logItem.ZipPath, Verdict: model.VerdictKeepArchive}
+				fp, fpErr := triageFingerprint(zipOnly, roots)
+				_, folderErr := os.Lstat(logItem.FolderPath)
+				if fpErr == nil && fp == migrationFingerprint && errors.Is(folderErr, os.ErrNotExist) {
+					_, indexed := index[zipOnly.ID]
+					if _, exists := decisions[zipOnly.ID]; !exists && !indexed && len(item.RelatedFolders) == 0 {
+						decisions[zipOnly.ID] = triageDecision{State: "save", Fingerprint: fp, RemovedFolder: logItem.FolderPath}
+						delete(decisions, logItem.ID)
+						if err := writeTriage(a.triageFile(), decisions); err != nil {
+							a.emit("delete:log_error", "triage migration: "+err.Error())
+						} else {
+							migrated = true
+						}
+					}
+				}
 			}
 		}
 
@@ -361,14 +425,25 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 			})
 			a.appendMoveLog(logger, logItem, request.Method, false, item.DeleteError, targetResults)
 		}
+		if migrated {
+			item.ID = model.MakeID(item.ZipPath, "")
+			item.FolderPath = ""
+			item.FolderMoved = false
+		}
 		updates[request.ID] = item
 		a.emit("delete:progress", DeleteProgress{Index: position + 1, Total: len(requests), Name: item.DisplayName(), Stage: "done"})
 	}
 
 	a.mu.Lock()
+	a.triageDisplay = nil
+	a.discardPreview = nil
 	for id, item := range updates {
 		if position, ok := a.index[id]; ok {
 			a.items[position] = item
+			if item.ID != id {
+				delete(a.index, id)
+				a.index[item.ID] = position
+			}
 		}
 	}
 	old := a.summary

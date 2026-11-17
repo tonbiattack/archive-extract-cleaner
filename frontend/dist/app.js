@@ -2061,6 +2061,8 @@
       actions:[{label:"キャンセル",onClick:closeModal}, {label:"検証済みフォルダを整理",disabled:blocked.length > 0,onClick:() => beginDelete(selection)}, {label:"破棄と判定した項目を処理",className:"btn danger",onClick:() => beginDiscard(selection)}]});
   }
 
+  // 通常ケース（検証済みフォルダのみ）は1画面で完結させる。
+  // 方法選択と最終確認を分けると、同じ内容を2回確認させることになるため。
   async function beginDelete() {
     const selection = Array.isArray(arguments[0]) ? arguments[0] : Array.from(state.selected, ([id, item]) => ({id, deletable:item.deletable}));
     if (state.busy || selection.length === 0 || selection.some(item => !item.deletable)) return;
@@ -2068,23 +2070,34 @@
     const ids = selection.map(item => item.id);
     state.busy = true;
     updateBusyUI();
-    setStatus("移動方法を確認しています...");
+    setStatus("移動対象を確認しています...");
     try {
       const options = await api("GetMoveOptions", ids);
       if (!Array.isArray(options) || options.length !== ids.length || ids.some(id => options.filter(option => option.id === id).length !== 1)) {
         toast("選択項目の一部が見つからないか重複しています。再スキャンしてください。", true);
         return;
       }
+      // 通常ケースは「解凍済みフォルダのみ」を既定にする。
+      const requests = [];
+      for (const option of options) {
+        if (!option.canFolder) continue;
+        const targets = targetsForOption(option, "folder");
+        if (targets.length === 0) continue;
+        requests.push({ id: option.id, method: "folder" });
+      }
+      if (requests.length === 0) {
+        toast("移動できる解凍済みフォルダがありません。", true);
+        return;
+      }
+      const preview = await api("PreviewMove", requests);
+      if (!window.Triage.validPreview(preview, requests)) throw new Error("全対象のフルパスを確認できません");
       state.moveOptions = options;
-      state.moveMethods = new Map();
-      options.forEach((option) => {
-        if (option.canFolder) state.moveMethods.set(option.id, "folder");
-      });
-      state.movePreview = null;
-      state.moveRequests = [];
-      showMoveMethodDialog();
+      state.moveMethods = new Map(requests.map((request) => [request.id, request.method]));
+      state.movePreview = preview;
+      state.moveRequests = requests;
+      showMoveFinalDialog(preview, requests);
     } catch (error) {
-      toast("移動方法の取得に失敗しました: " + (error.message || String(error)), true);
+      toast("移動対象の確認に失敗しました: " + (error.message || String(error)), true);
     } finally {
       state.busy = false;
       updateBusyUI();
@@ -2273,14 +2286,21 @@
       body +=
         '<label class="move-ack"><input type="checkbox" id="moveBothAck"> ZIPとフォルダの両方をごみ箱へ移動し、最後のローカルコピーを失う可能性があることを理解しました。</label>';
     }
+    // 通常ケース（検証済みフォルダのみ）は方法選択を経由しないため「戻る」を出さない。
+    // 高リスク操作（両方移動・ZIPのみ・手動不要判定）は方法選択に戻れるようにする。
+    const needsMethodStep = requests.some((request) => request.method !== "folder");
+    const actions = [];
+    if (needsMethodStep) {
+      actions.push({ label: "戻る", className: "btn", onClick: showMoveMethodDialog });
+    } else {
+      actions.push({ label: "キャンセル", className: "btn", onClick: closeModal });
+    }
+    actions.push({ label: "ごみ箱に移動", id: "moveExecuteBtn", className: "btn danger", onClick: () => executeMove(requests) });
     openModal({
       title: "ごみ箱への移動の最終確認",
       body,
       wide: true,
-      actions: [
-        { label: "戻る", className: "btn", onClick: showMoveMethodDialog },
-        { label: "ごみ箱に移動", id: "moveExecuteBtn", className: "btn danger", onClick: () => executeMove(requests) },
-      ],
+      actions,
     });
     updateMoveFinalButton();
   }

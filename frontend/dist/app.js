@@ -1,7 +1,12 @@
 (() => {
   "use strict";
 
-  const ROW_H = 34;
+  let storage;
+  try { storage = window.localStorage; } catch (_) { storage = null; }
+  const sizing = window.LayoutSizing.createSizing(storage && {
+    getItem: key => storage.getItem("archive-extract-cleaner.layout.v1." + key),
+    setItem: (key, value) => storage.setItem("archive-extract-cleaner.layout.v1." + key, value),
+  });
   const OVERSCAN = 10;
   const PAGE_SIZE = 200;
   const COLUMN_STORAGE_KEY = "archive-extract-cleaner.columnWidths.v1";
@@ -267,6 +272,69 @@
     saveColumnWidths();
   }
 
+  function setupLayoutSizing() {
+    const upper = el("upperRegion");
+    const splitter = el("upperSplitter");
+    const slider = el("rowHeight");
+    const output = el("rowHeightValue");
+    const app = el("app");
+    const available = () => Math.max(0, app.clientHeight - document.querySelector(".topbar").offsetHeight - document.querySelector(".statusbar").offsetHeight - splitter.offsetHeight);
+    function applyUpper() {
+      const max = Math.min(800, Math.max(0, available() - 120));
+      const height = sizing.upper(available());
+      upper.style.height = height + "px";
+      splitter.setAttribute("aria-valuemin", String(Math.min(80, max)));
+      splitter.setAttribute("aria-valuemax", String(max));
+      splitter.setAttribute("aria-valuenow", String(height));
+      scheduleRender();
+    }
+    function applyRow() {
+      const height = sizing.row();
+      document.documentElement.style.setProperty("--row-h", height + "px");
+      slider.value = String(height);
+      output.textContent = height + "px";
+      renderRows();
+    }
+    slider.addEventListener("input", () => { sizing.setRow(slider.value); applyRow(); });
+    splitter.addEventListener("keydown", event => {
+      const current = sizing.upper(available());
+      let next;
+      if (event.key === "ArrowUp") next = current - (event.shiftKey ? 40 : 10);
+      else if (event.key === "ArrowDown") next = current + (event.shiftKey ? 40 : 10);
+      else if (event.key === "Home") next = 80;
+      else if (event.key === "End") next = Math.min(800, available() - 120);
+      else return;
+      event.preventDefault();
+      sizing.setUpper(Math.min(next, Math.max(80, available() - 120)));
+      applyUpper();
+    });
+    splitter.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const start = sizing.upper(available());
+      const y = event.clientY;
+      const pointerId = event.pointerId;
+      try { splitter.setPointerCapture(pointerId); } catch (_) { /* window listeners suffice */ }
+      const move = e => {
+        if (e.pointerId !== pointerId) return;
+        sizing.setUpper(Math.min(start + e.clientY - y, Math.max(80, available() - 120)));
+        applyUpper();
+      };
+      const stop = e => {
+        if (e.pointerId !== pointerId) return;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", stop);
+        window.removeEventListener("pointercancel", stop);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", stop);
+      window.addEventListener("pointercancel", stop);
+    });
+    window.addEventListener("resize", applyUpper);
+    applyUpper();
+    applyRow();
+  }
+
   function setupColumnResizers() {
     tableHeader.querySelectorAll(".col-resize").forEach((handle) => {
       handle.addEventListener("pointerdown", (event) => {
@@ -486,7 +554,7 @@
 
   function renderRows() {
     const total = state.total;
-    virtualEl.style.height = Math.max(0, total) * ROW_H + "px";
+    virtualEl.style.height = Math.max(0, total) * sizing.row() + "px";
 
     if (!total) {
       rowsEl.innerHTML = "";
@@ -498,11 +566,11 @@
 
     const scrollTop = tableScroll.scrollTop;
     const viewport = tableScroll.clientHeight;
-    const start = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
-    const visibleCount = Math.ceil(viewport / ROW_H) + OVERSCAN * 2;
+    const start = Math.max(0, Math.floor(scrollTop / sizing.row()) - OVERSCAN);
+    const visibleCount = Math.ceil(viewport / sizing.row()) + OVERSCAN * 2;
     const end = Math.min(total, start + visibleCount);
 
-    rowsEl.style.transform = "translate3d(0," + start * ROW_H + "px,0)";
+    rowsEl.style.transform = "translate3d(0," + start * sizing.row() + "px,0)";
 
     const html = [];
     for (let index = start; index < end; index++) {
@@ -764,7 +832,7 @@
     }
     const headerHeight = tableHeader.getBoundingClientRect().height || 34;
     const contentY = y - rect.top - headerHeight + tableScroll.scrollTop;
-    const index = Math.floor(contentY / ROW_H);
+    const index = Math.floor(contentY / sizing.row());
     if (!Number.isFinite(index)) return null;
     return Math.max(0, Math.min(state.total - 1, index));
   }
@@ -2947,6 +3015,7 @@
   async function init() {
     loadColumnWidths();
     applyColumnWidths();
+    setupLayoutSizing();
     setupColumnResizers();
     bindEvents();
     const ready = await waitForAPI(6000);

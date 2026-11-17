@@ -323,7 +323,7 @@ func TestAppTransferReview(t *testing.T) {
 	}
 	app.multiDriveCopyScript = script
 	app.multiDriveCopyPreset = "Backup"
-	if err := app.SetTriage(app.items[0].ID, "save"); err != nil {
+	if _, err := app.SetTriageDetailed(app.items[0].ID, "save"); err != nil {
 		t.Fatal(err)
 	}
 

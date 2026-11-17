@@ -19,6 +19,9 @@ type Entry struct {
 	Success       bool      `json:"success"`
 	Error         string    `json:"error,omitempty"`
 	Reason        string    `json:"reason,omitempty"`
+	Path          string    `json:"path,omitempty"`
+	OldState      string    `json:"oldState,omitempty"`
+	NewState      string    `json:"newState,omitempty"`
 	MovedTargets  []string  `json:"movedTargets,omitempty"`
 	FailedTargets []string  `json:"failedTargets,omitempty"`
 	// AI推薦の記録。action が ai_suggestion のときだけ設定する。
@@ -69,12 +72,19 @@ func (l *Logger) Append(entry Entry) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 	data, err := json.Marshal(entry)
 	if err != nil {
+		file.Close()
 		return err
 	}
 	data = append(data, '\n')
 	_, err = file.Write(data)
-	return err
+	if err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

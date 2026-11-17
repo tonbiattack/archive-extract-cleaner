@@ -25,7 +25,7 @@ func TestTransferRejectsSharedOrContainingNonSavedItems(t *testing.T) {
 				}
 			}
 			a := &App{items: []model.Item{{ID: "saved", FolderPath: folder, Verdict: model.VerdictKeepDirectory}, {ID: "other", ZipPath: p}}, index: map[string]int{"saved": 0, "other": 1}, roots: []string{root}, triagePath: filepath.Join(t.TempDir(), "triage.json")}
-			if err := a.SetTriage("saved", "save"); err != nil {
+			if _, err := a.SetTriageDetailed("saved", "save"); err != nil {
 				t.Fatal(err)
 			}
 			if got := a.GetTransferReview().Candidates; len(got) != 0 {
@@ -55,7 +55,7 @@ func TestLegacyDeleteCannotBypassDiscardPreview(t *testing.T) {
 			if len(ids) != 1 {
 				t.Fatal(ids)
 			}
-			if err := a.SetTriage(ids[0], "save"); err != nil {
+			if _, err := a.SetTriageDetailed(ids[0], "save"); err != nil {
 				t.Fatal(err)
 			}
 			_, _ = a.DeleteSelected([]MoveRequest{{ID: ids[0], Method: method}}, true)
@@ -77,7 +77,7 @@ func TestTriageWriteFailsClosedWhenStoreLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{items: []model.Item{{ID: "x", ZipPath: p}}, index: map[string]int{"x": 0}, roots: []string{root}, triagePath: db}
-	if err := a.SetTriage("x", "save"); err == nil {
+	if _, err := a.SetTriageDetailed("x", "save"); err == nil {
 		t.Fatal("write ignored competing store lock")
 	}
 }

@@ -5,7 +5,7 @@ const source = fs.readFileSync(require('node:path').join(__dirname,'../dist/app.
 function extract(start,end,context) { vm.createContext(context); vm.runInContext(source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start))),context); }
 test('bulk triage uses a stable snapshot even if selection changes while awaiting', async () => {
   let release; const calls=[]; const selected=new Map([['a',{}],['b',{}]]);
-  const c={state:{selected,busy:false,activeId:null}, api:async (_name,id)=>{calls.push(id); if(id==='a') await new Promise(r=>release=r);},updateBusyUI(){},updateSelectionUI(){},cancelDragSelection(){},toast(){},reloadRows(){}};
+  const c={window:{Triage:require('../dist/triage.js')},state:{selected,busy:false,activeId:null}, api:async (_name,id)=>{calls.push(id); if(id==='a') await new Promise(r=>release=r); return {previous:'unjudged',state:'save'};},updateBusyUI(){},updateSelectionUI(){},cancelDragSelection(){},toast(){},reloadRows(){}};
   extract('  async function setTriage(', '  // ---------- summary', c);
   const pending=c.setTriage('save'); selected.delete('b'); selected.set('c',{}); release(); await pending;
   assert.deepEqual(calls,['a','b']);

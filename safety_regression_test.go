@@ -52,7 +52,7 @@ func TestLegacyFolderRejectsOtherScannedPaths(t *testing.T) {
 }
 func TestTransferLaunchFailsWhenTriageLocked(t *testing.T) {
 	a, id, zip, _ := safetyPair(t)
-	if err := a.SetTriage(id, "save"); err != nil {
+	if _, err := a.SetTriageDetailed(id, "save"); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := lockTriage(a.triageFile())
@@ -67,7 +67,7 @@ func TestTransferLaunchFailsWhenTriageLocked(t *testing.T) {
 }
 func TestSavedTriageAvailableBeforeRescan(t *testing.T) {
 	a, id, zip, _ := safetyPair(t)
-	if err := a.SetTriage(id, "save"); err != nil {
+	if _, err := a.SetTriageDetailed(id, "save"); err != nil {
 		t.Fatal(err)
 	}
 	r, err := a.DeleteSelected([]MoveRequest{{ID: id, Method: MoveMethodFolder}}, true)

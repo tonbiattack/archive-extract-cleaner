@@ -9,7 +9,7 @@ const app = fs.readFileSync(path.join(dist, 'app.js'), 'utf8');
 test('triage actions, filter and shortcuts are wired independently of recycle', () => {
   assert.match(html, /id="triageFilter"/);
   for (const state of ['save', 'discard', 'hold', 'unjudged']) assert.match(html, new RegExp(`data-triage="${state}"`));
-  assert.match(app, /api\("SetTriage", id, value\)/);
+  assert.match(app, /api\("SetTriageDetailed", id, value\)/);
   assert.match(app, /triage: state\.triageFilter/);
   assert.match(app, /window\.Triage\.shortcut\(event\)/);
   assert.doesNotMatch(app, /if \(!row \|\| !row\.deletable\) return/);

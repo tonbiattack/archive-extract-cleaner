@@ -17,7 +17,7 @@ function harness(api) {
 }
 test('discard previews exact paths and confirms with token; reports partial results and refreshes', async () => {
   const calls=[];
-  const h=harness(async (name,...args)=>{ calls.push([name,...args]); return name==='PreviewDiscard' ? {token:'tok',paths:['C:\\one.zip','C:\\two'],itemCount:2,targetCount:2,bytes:123} : [{path:'C:\\one.zip',success:true},{path:'C:\\two',success:false,reason:'locked'}]; });
+  const h=harness(async (name,...args)=>{ calls.push([name,...args]); return name==='PreviewDiscard' ? {token:'tok',paths:['C:\\one.zip','C:\\two'],itemCount:2,targetCount:2,fileCount:1,folderCount:1,targets:[{path:'C:\\one.zip',kind:'file',reason:'manual_discard',itemId:'a'},{path:'C:\\two',kind:'folder',reason:'manual_discard',itemId:'b'}],bytes:123} : {results:[{path:'C:\\one.zip',success:true},{path:'C:\\two',success:false,reason:'locked'}]}; });
   await h.context.beginDiscard();
   assert.deepEqual(Array.from(calls[0][1]), ['a','b']);
   assert.match(h.dialogs[0].body, /C:\\one\.zip/);
@@ -25,15 +25,26 @@ test('discard previews exact paths and confirms with token; reports partial resu
   assert.match(h.dialogs[0].body, /123 bytes/);
   await h.dialogs[0].actions[1].onClick();
   assert.equal(calls.length,1);
-  assert.match(h.dialogs[1].body, /アーカイブ/);
+  assert.match(h.dialogs[1].body, /ファイル 1 件/);
+  assert.match(h.dialogs[1].body, /フォルダ 1 件/);
+  assert.match(h.dialogs[1].body, /手動で破棄/);
   await h.dialogs[1].actions[1].onClick();
-  assert.deepEqual(calls[1], ['RecycleDiscard','tok',true]);
+  assert.deepEqual(calls[1], ['RecycleDiscardDetailed','tok',true]);
   assert.match(h.dialogs.at(-1).body, /locked/);
   assert.match(h.dialogs.at(-1).body, /C:\\one\.zip/);
   assert.equal(h.reloads.length,1);
 });
+test('folder-only review never claims an archive is included', async () => {
+  const h=harness(async () => ({token:'tok', paths:['/folder'],itemCount:1,targetCount:1,fileCount:0,folderCount:1,bytes:0,targets:[{path:'/folder',kind:'folder',reason:'manual_discard',itemId:'a'}]}));
+  await h.context.beginDiscard([{id:'a'}]);
+  assert.match(h.dialogs[0].body, /ファイル 0 件/);
+  assert.match(h.dialogs[0].body, /フォルダ 1 件/);
+  await h.dialogs[0].actions[1].onClick();
+  assert.doesNotMatch(h.dialogs[1].body, /アーカイブ/);
+  assert.match(h.dialogs[1].body, /手動で破棄/);
+});
 test('successful recycle displays escaped backend warning while retaining success', async () => {
-  const h = harness(async () => [{path:'C:\\one.zip', success:true, reason:'warning <unsafe>'}]);
+  const h = harness(async () => ({results:[{path:'C:\\one.zip', success:true, reason:'warning <unsafe>'}]}));
   await h.context.executeDiscard('tok');
   assert.match(h.dialogs.at(-1).body, /成功/);
   assert.match(h.dialogs.at(-1).body, /警告/);

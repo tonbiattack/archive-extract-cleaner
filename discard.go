@@ -136,6 +136,14 @@ func (a *App) PreviewDiscard(ids []string) (DiscardPreview, error) {
 		}
 		targets = append(targets, DiscardTarget{Path: target, Kind: kind, Reason: "manual_discard", ItemID: snapshot.owners[target]})
 		for _, item := range a.items {
+			// AMBIGUOUS の RelatedFolders は「対応先」ではなく「候補」であり、
+			// どれが実際に対応するか決まっていない。これを重複判定に使うと、
+			// 候補に含まれるだけの無関係なフォルダ（例: 0 (1) (15).zip の候補に
+			// 0 (1) (13) が入る）を破棄できなくなる。
+			// 実際に対応が確定している項目だけを重複判定の対象にする。
+			if item.Verdict == model.VerdictAmbiguous {
+				continue
+			}
 			for _, other := range append([]string{item.ZipPath, item.FolderPath}, item.RelatedFolders...) {
 				if other != "" && ((item.ID != snapshot.owners[target] && (winpath.EqualPath(target, other) || winpath.IsWithin(other, target))) || (!winpath.EqualPath(target, other) && winpath.IsWithin(target, other))) {
 					return DiscardPreview{}, fmt.Errorf("item %s path %s overlaps item %s path %s; resolve the overlap before recycling", snapshot.owners[target], target, item.ID, other)

@@ -17,6 +17,7 @@ import (
 	"github.com/tonbiattack/archive-extract-cleaner/internal/cache"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/config"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/dashboard"
+	"github.com/tonbiattack/archive-extract-cleaner/internal/duplicates"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/engine"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/model"
 	"github.com/tonbiattack/archive-extract-cleaner/internal/oplog"
@@ -64,6 +65,17 @@ type App struct {
 	triagePath           string
 	discardPreview       *discardSnapshot
 	triageDisplay        map[string]triageDisplayEntry
+	// duplicateSearch は E/F/G の同名アーカイブ検索の設定。
+	duplicateSearch config.ArchiveSearch
+	// duplicateRoots はドライブレターごとの保存先を明示する。テスト用。
+	duplicateRoots map[string]string
+	// duplicateResults は項目IDごとの検索結果。未検索の項目は含まない。
+	duplicateResults map[string]duplicates.Result
+	// duplicateDrives は直近の検索でのドライブ状況。
+	duplicateDrives []duplicates.DriveState
+	// duplicateSearching は検索の実行中フラグ。
+	duplicateSearching bool
+	cancelDuplicate    context.CancelFunc
 }
 
 type ScanInfo struct {
@@ -158,6 +170,8 @@ func NewApp() *App {
 		suggestions:          &aiSuggestionStore{},
 		archiveHashes:        cache.NewArchiveHashes(cache.DefaultHashesPath()),
 		scanStore:            cache.NewScanStore(cache.DefaultScanPath()),
+		duplicateSearch:      cfg.ArchiveSearch,
+		duplicateResults:     map[string]duplicates.Result{},
 	}
 	if configErr != nil {
 		app.configWarning = "設定ファイルを読み込めないため既定値を使用します: " + configErr.Error()
@@ -508,7 +522,8 @@ func (a *App) GetRows(query RowQuery) RowPage {
 		triageError = triageErr.Error()
 	}
 	states := a.advisoryTriageStates(items, roots, decisions)
-	filtered := filterItems(items, query)
+	duplicateResults := a.duplicateResultsSnapshot()
+	filtered := filterItemsWithDuplicates(items, query, duplicateResults)
 	if query.Triage != "" && query.Triage != "all" {
 		out := filtered[:0]
 		for _, item := range filtered {
@@ -518,7 +533,7 @@ func (a *App) GetRows(query RowQuery) RowPage {
 		}
 		filtered = out
 	}
-	sortItems(filtered, query.Sort, query.Desc)
+	sortItemsWithDuplicates(filtered, query.Sort, query.Desc, duplicateResults)
 
 	total := len(filtered)
 	offset := query.Offset
@@ -543,6 +558,10 @@ func (a *App) GetRows(query RowQuery) RowPage {
 	for _, item := range filtered[offset:end] {
 		row := toRow(item)
 		row.Triage = states[item.ID]
+		if result, ok := duplicateResults[item.ID]; ok {
+			copied := result
+			row.Duplicate = &copied
+		}
 		rows = append(rows, row)
 	}
 	// ダッシュボードはスキャン全体の値。一覧の絞り込みとは独立させる。
@@ -576,7 +595,8 @@ func (a *App) CandidateIDs(query RowQuery) []string {
 	roots := append([]string(nil), a.roots...)
 	triagePath := a.triageFile()
 	a.mu.RUnlock()
-	filtered := filterItems(items, query)
+	duplicateResults := a.duplicateResultsSnapshot()
+	filtered := filterItemsWithDuplicates(items, query, duplicateResults)
 	if query.Triage != "" && query.Triage != "all" {
 		decisions, err := readTriage(triagePath)
 		if err != nil {
@@ -590,7 +610,7 @@ func (a *App) CandidateIDs(query RowQuery) []string {
 		}
 		filtered = out
 	}
-	sortItems(filtered, query.Sort, query.Desc)
+	sortItemsWithDuplicates(filtered, query.Sort, query.Desc, duplicateResults)
 	ids := make([]string, 0, len(filtered))
 	for _, item := range filtered {
 		if item.Deletable() {

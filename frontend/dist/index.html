@@ -61,6 +61,8 @@
         <button class="filter" data-filter="mismatch">不一致</button>
         <button class="filter" data-filter="unverified">未検証</button>
         <button class="filter" data-filter="keep">保持</button>
+        <button class="filter" data-filter="duplicate" title="E/F/G の保存先に同名アーカイブがある項目。同名は同一内容を意味しません">E/F/Gに同名あり</button>
+        <button class="filter" data-filter="duplicate-same-size" title="E/F/G の保存先に同名かつ同サイズのアーカイブがある項目。同サイズでも同一内容とは限りません">同名・同サイズ</button>
       </div>
       <label>整理状態 <select id="triageFilter" aria-label="整理状態で絞り込み"><option value="all">すべて</option><option value="unjudged">未判定</option><option value="save">保存</option><option value="discard">破棄</option><option value="hold">保留</option></select></label>
       <div id="triageActions" class="triage-actions" role="group" aria-label="選択項目の整理状態">
@@ -71,10 +73,13 @@
         <button id="resetColumnsBtn" class="btn">列幅リセット</button>
         <button id="exportCsvBtn" class="btn">CSV書き出し</button>
         <button id="exportJsonBtn" class="btn">JSON書き出し</button>
+        <button id="duplicateSearchBtn" class="btn" title="E/F/G の保存先に同名アーカイブがあるか調べます。同名は同一内容を意味しません">E/F/Gの同名を検索</button>
+        <button id="duplicateClearBtn" class="btn" title="同名アーカイブの検索結果を破棄します">同名結果を消す</button>
         <button id="transferBtn" class="btn">保存したデータをE/F/Gへコピー</button>
         <button id="selectAllBtn" class="btn">表示条件の全項目を選択</button>
         <button id="clearSelectionBtn" class="btn">選択解除</button>
       </div>
+      <div id="duplicateStatus" class="duplicate-status hidden" role="status" aria-live="polite"></div>
     </section>
 
     <section class="summary-bar">
@@ -122,7 +127,8 @@
             <button class="cell sort" data-sort="folder">解凍済みフォルダ<span class="arrow"></span><span class="col-resize" data-col="4" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort" data-sort="parent">親パス<span class="arrow"></span><span class="col-resize" data-col="5" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
             <button class="cell sort numeric" data-sort="size">サイズ<span class="arrow"></span><span class="col-resize" data-col="6" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
-            <button class="cell sort" data-sort="reason">理由<span class="arrow"></span><span class="col-resize" data-col="7" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="duplicate" title="E/F/G の保存先にある同名アーカイブ。同名は同一内容を意味しません">E/F/G同名<span class="arrow"></span><span class="col-resize" data-col="7" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
+            <button class="cell sort" data-sort="reason">理由<span class="arrow"></span><span class="col-resize" data-col="8" title="ドラッグで幅変更 / ダブルクリックで自動調整"></span></button>
           </div>
           <div id="virtual" class="virtual">
             <div id="rows" class="rows"></div>

@@ -9,7 +9,7 @@
   });
   const OVERSCAN = 10;
   const PAGE_SIZE = 200;
-  const COLUMN_STORAGE_KEY = "archive-extract-cleaner.columnWidths.v1";
+  const COLUMN_STORAGE_KEY = "archive-extract-cleaner.columnWidths.v2";
   const COLUMNS = [
     { min: 34, def: 34 },
     { min: 90, def: 106 },
@@ -18,6 +18,7 @@
     { min: 100, def: 210 },
     { min: 100, def: 220 },
     { min: 80, def: 96 },
+    { min: 110, def: 150 },
     { min: 120, def: 260 },
   ];
 
@@ -617,6 +618,104 @@
       '<div class="empty-title">' + esc(title) + '</div><div class="empty-text">' + esc(text) + "</div>";
   }
 
+  // 同名アーカイブのセル。同名は同一内容を意味しないため、
+  // 「同サイズ」でも一致とは表示しない。
+  function duplicateCell(row) {
+    const result = row.duplicate;
+    if (!result) {
+      return '<div class="cell duplicate-cell" title="未検索です。ツールバーの「E/F/Gの同名を検索」で調べられます">—</div>';
+    }
+    const status = result.status;
+    if (status === "unknown") {
+      return '<div class="cell duplicate-cell" title="' + esc(duplicateTitle(result)) + '"><span class="badge badge-unknown">未確認</span></div>';
+    }
+    if (status === "none") {
+      return '<div class="cell duplicate-cell" title="同名のアーカイブは見つかりませんでした">なし</div>';
+    }
+    const label = status === "same_size" ? "同名・同サイズ" : "同名・サイズ違い";
+    const className = status === "same_size" ? "badge-duplicate-same" : "badge-duplicate-diff";
+    return '<div class="cell duplicate-cell" title="' + esc(duplicateTitle(result)) + '"><span class="badge ' + className + '">' + esc(label) + "</span></div>";
+  }
+
+  // duplicateTitle はツールチップ用に、見つかったドライブとパスを並べる。
+  function duplicateTitle(result) {
+    const lines = [];
+    const drives = Array.isArray(result.drives) ? result.drives : [];
+    for (const drive of drives) {
+      if (!drive.available) {
+        lines.push(drive.drive + ": " + (drive.reason || "未確認"));
+      }
+    }
+    const hits = Array.isArray(result.hits) ? result.hits : [];
+    for (const hit of hits) {
+      lines.push(hit.drive + ": " + hit.path + (hit.sameSize ? "（同サイズ）" : "（サイズ違い）"));
+    }
+    if (!lines.length) lines.push("同名のアーカイブは見つかりませんでした");
+    lines.push("同名は同一内容を意味しません。削除の根拠にしないでください。");
+    return lines.join("\n");
+  }
+
+  // E/F/G の同名アーカイブ検索。同名は同一内容を意味しないため、
+  // 結果は表示専用で、削除や移動の判断には使わない。
+  async function runDuplicateSearch(button) {
+    if (state.busy) return;
+    state.busy = true;
+    if (button) button.disabled = true;
+    updateBusyUI();
+    setStatus("E/F/G の同名アーカイブを検索しています...");
+    try {
+      const result = await api("SearchDuplicates");
+      renderDuplicateStatus(result);
+      await loadRows();
+      toast("同名アーカイブの検索が完了しました");
+    } catch (error) {
+      toast("同名アーカイブの検索に失敗しました: " + (error.message || String(error)), true);
+    } finally {
+      state.busy = false;
+      if (button) button.disabled = false;
+      updateBusyUI();
+    }
+  }
+
+  async function clearDuplicateResults() {
+    if (state.busy) return;
+    try {
+      const result = await api("ClearDuplicateResults");
+      renderDuplicateStatus(result);
+      await loadRows();
+    } catch (error) {
+      toast("検索結果の破棄に失敗しました: " + (error.message || String(error)), true);
+    }
+  }
+
+  // renderDuplicateStatus はドライブごとの確認状況を表示する。
+  // 未接続を「なし」と誤解させないため、理由を必ず出す。
+  function renderDuplicateStatus(result) {
+    const box = el("duplicateStatus");
+    if (!box) return;
+    if (!result || !result.enabled) {
+      box.classList.add("hidden");
+      box.textContent = "";
+      return;
+    }
+    const parts = [];
+    const drives = Array.isArray(result.driveStates) ? result.driveStates : [];
+    for (const drive of drives) {
+      if (drive.available) {
+        parts.push(drive.drive + ": " + (drive.indexed || 0) + " 件を確認" + (drive.truncated ? "（上限で打ち切り）" : ""));
+      } else {
+        parts.push(drive.drive + ": 未確認（" + (drive.reason || "理由不明") + "）");
+      }
+    }
+    if (!parts.length) {
+      box.classList.add("hidden");
+      box.textContent = "";
+      return;
+    }
+    box.classList.remove("hidden");
+    box.textContent = "同名検索 — " + parts.join(" / ") + "（同名は同一内容を意味しません）";
+  }
+
   function rowHtml(row, index) {
     const selected = state.selected.has(row.id);
     const active = state.activeId === row.id;
@@ -670,6 +769,7 @@
       '<div class="cell numeric">' +
       esc(fmtBytes(row.size)) +
       "</div>" +
+      duplicateCell(row) +
       '<div class="cell reason-cell" title="' +
       esc(row.reason) +
       '">' +
@@ -3081,6 +3181,10 @@
     const exportJsonBtn = el("exportJsonBtn");
     if (exportCsvBtn) exportCsvBtn.addEventListener("click", () => exportReport("csv", exportCsvBtn));
     if (exportJsonBtn) exportJsonBtn.addEventListener("click", () => exportReport("json", exportJsonBtn));
+    const duplicateSearchBtn = el("duplicateSearchBtn");
+    const duplicateClearBtn = el("duplicateClearBtn");
+    if (duplicateSearchBtn) duplicateSearchBtn.addEventListener("click", () => runDuplicateSearch(duplicateSearchBtn));
+    if (duplicateClearBtn) duplicateClearBtn.addEventListener("click", clearDuplicateResults);
     transferBtn.addEventListener("click", openTransferReview);
     deleteBtn.addEventListener("click", beginDelete);
     el("discardBtn").addEventListener("click", beginDiscard);

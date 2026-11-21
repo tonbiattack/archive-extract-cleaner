@@ -239,6 +239,14 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 			if other.ID == item.ID {
 				continue
 			}
+			// AMBIGUOUS の RelatedFolders は「対応先」ではなく「候補」であり、
+			// どれが実際に対応するか決まっていない。これを重複判定に使うと、
+			// 候補に含まれるだけの無関係なフォルダ（例: 0 (1) (15).zip の候補に
+			// 0 (1) (13) が入る）が永久に移動できなくなる。
+			// 実際に対応が確定している項目だけを重複判定の対象にする。
+			if other.Verdict == model.VerdictAmbiguous {
+				continue
+			}
 			for _, p := range append([]string{other.ZipPath, other.FolderPath}, other.RelatedFolders...) {
 				if p != "" && (winpath.EqualPath(item.FolderPath, p) || winpath.IsWithin(item.FolderPath, p) || winpath.IsWithin(p, item.FolderPath)) {
 					unsafeFolder = true
@@ -248,7 +256,7 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 		if unsafeFolder {
 			skipped++
 			moves.AddMoveResult(dashboard.MoveOutcome{Skipped: true, Bytes: item.Size})
-			results = append(results, MoveResult{ID: item.ID, Method: request.Method, Skipped: true, Reason: "archive unavailable or folder overlaps another item", LogPath: a.logPath})
+			results = append(results, MoveResult{ID: item.ID, Method: request.Method, Skipped: true, Reason: unsafeFolderReason(item), LogPath: a.logPath})
 			continue
 		}
 		option := buildMoveOption(item)
@@ -477,6 +485,24 @@ func (a *App) DeleteSelected(requests []MoveRequest, confirmed bool) (MoveRespon
 }
 
 // targetsBytes は移動対象の合計サイズを返す。
+// unsafeFolderReason は移動を見送った理由を、利用者が対処できる言葉で返す。
+// 以前は "archive unavailable or folder overlaps another item" とだけ出していたため、
+// 何を直せばよいか分からなかった。
+func unsafeFolderReason(item model.Item) string {
+	switch {
+	case item.ZipMoved:
+		return "アーカイブは既に移動済みです。残ったフォルダを移動するには再スキャンしてください"
+	case item.FolderMoved:
+		return "フォルダは既に移動済みです"
+	case item.ZipPath == "":
+		return "対応するアーカイブがないため、この操作では移動できません"
+	case item.FolderPath == "":
+		return "対応するフォルダがないため、この操作では移動できません"
+	default:
+		return "このフォルダは別の項目と範囲が重なっているため移動できません。重なっている項目を先に処理するか、対象から外してください"
+	}
+}
+
 func targetsBytes(targets []MoveTargetOption) int64 {
 	var total int64
 	for _, target := range targets {

@@ -1833,3 +1833,11 @@ input[type="checkbox"]:disabled {
 .help-table code { font-size: 11px; }
 .help-list { margin: 0 0 10px; padding-left: 20px; }
 .help-list li { margin-bottom: 6px; }
+
+/* ブランドマークはアプリアイコンを表示する */
+.brand-mark img {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: block;
+}

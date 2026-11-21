@@ -53,6 +53,7 @@
     lastCache: null,
     cacheInfo: null,
     archiveInfo: null,
+    duplicateInfo: null,
     dashboard: null,
     dashboardCollapsed: false,
     multiDriveCopyScript: "",
@@ -655,10 +656,48 @@
     return lines.join("\n");
   }
 
+  // applyDuplicateAvailability は同名検索が設定で無効なとき、
+  // ボタンを押せないようにして理由を示す。押してからエラーにしない。
+  function applyDuplicateAvailability() {
+    const info = state.duplicateInfo;
+    const enabled = !!(info && info.enabled);
+    const searchBtn = el("duplicateSearchBtn");
+    const clearBtn = el("duplicateClearBtn");
+    const hint = enabled
+      ? "E/F/G の保存先に同名アーカイブがあるか調べます。同名は同一内容を意味しません"
+      : "同名検索は設定で無効です。config.json の archiveSearch.enabled を true にすると使えます";
+    if (searchBtn) {
+      searchBtn.disabled = !enabled || state.busy;
+      searchBtn.title = hint;
+    }
+    if (clearBtn) {
+      clearBtn.disabled = !enabled || state.busy;
+      clearBtn.title = hint;
+    }
+    // 無効時はフィルタも意味を持たないため、選択中なら全件へ戻す。
+    if (!enabled && (state.filter === "duplicate" || state.filter === "duplicate-same-size")) {
+      state.filter = "all";
+      if (filterBar) {
+        filterBar.querySelectorAll("[data-filter]").forEach((item) => {
+          item.classList.toggle("active", item.dataset.filter === "all");
+        });
+      }
+    }
+    const box = el("duplicateStatus");
+    if (box && !enabled) {
+      box.classList.remove("hidden");
+      box.textContent = "同名検索は無効です（config.json の archiveSearch.enabled を true にしてください）";
+    }
+  }
+
   // E/F/G の同名アーカイブ検索。同名は同一内容を意味しないため、
   // 結果は表示専用で、削除や移動の判断には使わない。
   async function runDuplicateSearch(button) {
     if (state.busy) return;
+    if (!state.duplicateInfo || !state.duplicateInfo.enabled) {
+      toast("同名検索は設定で無効です。config.json の archiveSearch.enabled を true にしてください", true);
+      return;
+    }
     state.busy = true;
     if (button) button.disabled = true;
     updateBusyUI();
@@ -1428,6 +1467,117 @@
       return formats + "（7z / RAR は 7-Zip 未検出のため検証できません）";
     }
     return formats + "（7-Zip: " + (info.toolPath || "検出済み") + "）";
+  }
+
+  // 仕様ダイアログ。判定の意味・操作の流れ・安全条件をアプリ内で確認できる。
+  // docs/SPEC.md と README の要点を、利用者向けの言葉でまとめる。
+  const HELP_SECTIONS = [
+    {
+      id: "verdict",
+      label: "判定の意味",
+      html:
+        "<p>このアプリは、アーカイブ（.zip / .7z / .rar）と解凍済みフォルダを照合し、" +
+        "<strong>内容が完全一致したフォルダだけ</strong>をごみ箱への移動候補にします。</p>" +
+        '<table class="help-table"><thead><tr><th>判定</th><th>意味</th><th>動作</th></tr></thead><tbody>' +
+        "<tr><td><code>KEEP_ARCHIVE</code></td><td>対応するフォルダがない</td><td>アーカイブを保持</td></tr>" +
+        "<tr><td><code>KEEP_DIRECTORY</code></td><td>対応するアーカイブがない</td><td>フォルダを保持（転送候補）</td></tr>" +
+        "<tr><td><code>DELETE_CANDIDATE</code></td><td>全ファイル・空ディレクトリまで一致</td><td>フォルダのみ移動できる</td></tr>" +
+        "<tr><td><code>DELETE_CANDIDATE_IGNORABLE</code></td><td>差分がアーカイブ側の補助ファイルだけ</td><td>フォルダのみ移動できる（差分を表示）</td></tr>" +
+        "<tr><td><code>MISMATCH</code></td><td>追加・不足・内容変更がある</td><td>両方保持</td></tr>" +
+        "<tr><td><code>AMBIGUOUS</code></td><td>候補が複数、または比較方式が複数成立</td><td>両方保持</td></tr>" +
+        "<tr><td><code>UNVERIFIED</code></td><td>破損・暗号化・リンク混入・上限超過など</td><td>両方保持</td></tr>" +
+        "</tbody></table>" +
+        '<p class="modal-note">「名前が同じ」だけでは削除候補になりません。必ず内容を検証します。</p>',
+    },
+    {
+      id: "flow",
+      label: "操作の流れ",
+      html:
+        "<ol class=\"help-list\">" +
+        "<li><strong>対象フォルダを追加</strong>して「スキャン」を押します。読み取りのみで、ファイルは変更しません。</li>" +
+        "<li><strong>一覧で判定を確認</strong>します。行を選ぶと右側に中身のプレビューが出ます。</li>" +
+        "<li><strong>整理状態を決めます</strong>。「保存 (S)」「破棄 (D)」「保留 (H)」を選べます。これは仕分けの記録で、まだ何も移動しません。</li>" +
+        "<li><strong>ごみ箱へ移動</strong>します。検証済みフォルダは「選択項目をごみ箱に移動」、手動で破棄と決めた項目は「破棄と判定した選択項目をごみ箱へ」を使います。</li>" +
+        "<li>必要なら<strong>残ったデータを E/F/G へコピー</strong>します（multi-drive-copy 連携）。</li>" +
+        "</ol>" +
+        '<p class="modal-note">スキャンやプレビューを見ただけでは、ファイルは移動されません。移動は明示操作でのみ実行します。</p>',
+    },
+    {
+      id: "safety",
+      label: "安全条件",
+      html:
+        '<ul class="help-list">' +
+        "<li><strong>完全削除はしません。</strong> 削除は Windows のごみ箱への移動だけで、ごみ箱が使えない環境では中止して理由を表示します。</li>" +
+        "<li><strong>移動直前に必ず再照合します。</strong> スキャン後にファイルが変わっていればスキップします。</li>" +
+        "<li><strong>ごみ箱へ移した容量は、空き容量の増加ではありません。</strong> ごみ箱を空にするまで物理領域は残ります。</li>" +
+        "<li><strong>リンク・ジャンクション・リパースポイントは扱いません。</strong> 別ボリュームへ抜ける可能性があるためです。</li>" +
+        "<li><strong>対象ルート自身は移動できません。</strong> 配下のフォルダだけが対象です。</li>" +
+        "<li><strong>別の項目を含むフォルダは移動しません。</strong> パスと結果が食い違うためです。</li>" +
+        "</ul>" +
+        '<p class="modal-note">重要なデータは事前にバックアップしてください。</p>',
+    },
+    {
+      id: "duplicate",
+      label: "E/F/G 同名検索",
+      html:
+        "<p>整理対象のアーカイブと<strong>同じ名前のファイル</strong>が、E/F/G の保存先に既にあるかを調べます。" +
+        "multi-drive-copy でコピーする前に、重複コピーを避けるための情報です。</p>" +
+        '<table class="help-table"><thead><tr><th>表示</th><th>意味</th></tr></thead><tbody>' +
+        "<tr><td><code>—</code></td><td>未検索</td></tr>" +
+        "<tr><td>なし</td><td>検索したが同名は見つからなかった</td></tr>" +
+        "<tr><td>同名・同サイズ</td><td>同名でサイズも一致。<strong>内容一致は意味しません</strong></td></tr>" +
+        "<tr><td>同名・サイズ違い</td><td>同名だがサイズが異なる</td></tr>" +
+        "<tr><td>未確認</td><td>ドライブ未接続・アクセス拒否などで確認できなかった</td></tr>" +
+        "</tbody></table>" +
+        '<p class="modal-note"><strong>「未確認」を「なし」と読み替えないでください。</strong> ドライブが接続されていないだけの可能性があります。</p>' +
+        '<p class="modal-note">この結果は表示専用です。削除の可否や移動の判断には使いません。既定では無効で、' +
+        "設定ファイルの <code>archiveSearch.enabled</code> を <code>true</code> にすると使えます。</p>",
+    },
+    {
+      id: "settings",
+      label: "設定と上限",
+      html:
+        "<p>設定は <code>config.json</code> で行います。変更後はアプリを再起動してください。</p>" +
+        '<table class="help-table"><thead><tr><th>キー</th><th>内容</th></tr></thead><tbody>' +
+        "<tr><td><code>limits.maxEntries</code></td><td>エントリ数の上限。超えると <code>UNVERIFIED</code></td></tr>" +
+        "<tr><td><code>limits.maxTotalBytes</code></td><td>展開後合計サイズの上限</td></tr>" +
+        "<tr><td><code>limits.maxFileBytes</code></td><td>単一ファイルの上限</td></tr>" +
+        "<tr><td><code>workers</code></td><td>照合の並列度。0 は自動（CPU数・上限8）</td></tr>" +
+        "<tr><td><code>archiveTool</code></td><td>7z.exe のパス。空なら自動検出</td></tr>" +
+        "<tr><td><code>archiveSearch.enabled</code></td><td>E/F/G の同名検索を有効にする</td></tr>" +
+        "<tr><td><code>archiveSearch.drives</code></td><td>検索するドライブ（既定 E/F/G）</td></tr>" +
+        "<tr><td><code>archiveSearch.recursive</code></td><td>配下サブフォルダまで検索する</td></tr>" +
+        "<tr><td><code>ai.enabled</code></td><td>AI 推薦を有効にする（既定は無効）</td></tr>" +
+        "</tbody></table>" +
+        '<p class="modal-note">7z / RAR の照合には <a href="https://www.7-zip.org/" target="_blank" rel="noreferrer">7-Zip</a> が必要です。' +
+        "未導入の環境では 7z / RAR は「未検証」として保持され、削除候補になりません。</p>",
+    },
+  ];
+
+  let helpSection = "verdict";
+
+  function showHelp(section) {
+    if (section) helpSection = section;
+    const tabs = HELP_SECTIONS.map(
+      (item) =>
+        '<button class="help-tab' +
+        (item.id === helpSection ? " active" : "") +
+        '" data-help-tab="' +
+        item.id +
+        '">' +
+        esc(item.label) +
+        "</button>"
+    ).join("");
+    const current = HELP_SECTIONS.find((item) => item.id === helpSection) || HELP_SECTIONS[0];
+    const body =
+      '<div class="help-tabs" role="tablist">' + tabs + "</div>" +
+      '<div class="help-body">' + current.html + "</div>";
+    openModal({
+      title: "仕様と使い方",
+      body,
+      wide: true,
+      actions: [{ label: "閉じる", className: "btn primary", onClick: closeModal }],
+    });
   }
 
   function showSettings() {
@@ -2867,6 +3017,7 @@
     rootList.querySelectorAll("button").forEach((button) => {
       button.disabled = state.busy;
     });
+    applyDuplicateAvailability();
     updateSelectionUI();
   }
 
@@ -3190,6 +3341,12 @@
     el("discardBtn").addEventListener("click", beginDiscard);
     warningBadge.addEventListener("click", showWarnings);
     modalClose.addEventListener("click", closeModal);
+    modalBody.addEventListener("click", (event) => {
+      const tab = event.target.closest("[data-help-tab]");
+      if (tab) {
+        showHelp(tab.dataset.helpTab);
+      }
+    });
     modalBody.addEventListener("change", (event) => {
       if (event.target.matches("[data-move-method]")) {
         const id = event.target.dataset.moveMethod;
@@ -3223,6 +3380,8 @@
       api("OpenLog").catch((error) => toast("操作ログを開けません: " + error.message, true));
     });
     settingsBtn.addEventListener("click", showSettings);
+    const helpBtn = el("helpBtn");
+    if (helpBtn) helpBtn.addEventListener("click", () => showHelp());
     const dashboardToggle = el("dashboardToggle");
     const dashboardPanel = el("dashboardPanel");
     if (dashboardToggle && dashboardPanel) {
@@ -3298,6 +3457,8 @@
         state.ai = info.ai || null;
         state.cacheInfo = info.cache || null;
         state.archiveInfo = info.archive || null;
+        state.duplicateInfo = info.duplicate || null;
+        applyDuplicateAvailability();
         state.multiDriveCopyScript = info.multiDriveCopyScript || "";
         state.multiDriveCopyPreset = info.multiDriveCopyPreset || "";
         state.multiDriveCopyAvailable = !!info.multiDriveCopyAvailable;

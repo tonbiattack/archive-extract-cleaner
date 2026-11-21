@@ -88,24 +88,25 @@ type ScanInfo struct {
 }
 
 type AppState struct {
-	Summary                 model.Summary `json:"summary"`
-	Warnings                []string      `json:"warnings"`
-	WarningTotal            int           `json:"warningTotal"`
-	Roots                   []string      `json:"roots"`
-	Scanning                bool          `json:"scanning"`
-	Deleting                bool          `json:"deleting"`
-	LogPath                 string        `json:"logPath"`
-	ConfigPath              string        `json:"configPath"`
-	ConfigWarning           string        `json:"configWarning"`
-	Limits                  model.Limits  `json:"limits"`
-	Workers                 int           `json:"workers"`
-	MultiDriveCopyScript    string        `json:"multiDriveCopyScript"`
-	MultiDriveCopyPreset    string        `json:"multiDriveCopyPreset"`
-	MultiDriveCopyAvailable bool          `json:"multiDriveCopyAvailable"`
-	AI                      AIState       `json:"ai"`
-	Cache                   CacheState    `json:"cache"`
-	Archive                 ArchiveState  `json:"archive"`
-	Version                 string        `json:"version"`
+	Summary                 model.Summary  `json:"summary"`
+	Warnings                []string       `json:"warnings"`
+	WarningTotal            int            `json:"warningTotal"`
+	Roots                   []string       `json:"roots"`
+	Scanning                bool           `json:"scanning"`
+	Deleting                bool           `json:"deleting"`
+	LogPath                 string         `json:"logPath"`
+	ConfigPath              string         `json:"configPath"`
+	ConfigWarning           string         `json:"configWarning"`
+	Limits                  model.Limits   `json:"limits"`
+	Workers                 int            `json:"workers"`
+	MultiDriveCopyScript    string         `json:"multiDriveCopyScript"`
+	MultiDriveCopyPreset    string         `json:"multiDriveCopyPreset"`
+	MultiDriveCopyAvailable bool           `json:"multiDriveCopyAvailable"`
+	AI                      AIState        `json:"ai"`
+	Cache                   CacheState     `json:"cache"`
+	Archive                 ArchiveState   `json:"archive"`
+	Duplicate               DuplicateState `json:"duplicate"`
+	Version                 string         `json:"version"`
 }
 
 // ArchiveState はアーカイブ読み取りの対応状況。
@@ -218,6 +219,7 @@ func (a *App) GetState() AppState {
 		AI:                      a.aiStateLocked(),
 		Cache:                   a.cacheStateLocked(),
 		Archive:                 archiveState(),
+		Duplicate:               a.duplicateStateLocked(),
 		Version:                 appVersion,
 	}
 }

@@ -1788,3 +1788,48 @@ input[type="checkbox"]:disabled {
   color: var(--accent);
   font-size: 11.5px;
 }
+
+/* 仕様ダイアログ */
+.help-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+}
+.help-tab {
+  padding: 5px 11px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.help-tab:hover { background: var(--accent-soft); color: var(--accent); }
+.help-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 650;
+}
+.help-body { font-size: 12.5px; line-height: 1.7; }
+.help-body p { margin: 0 0 10px; }
+.help-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0 12px;
+  font-size: 12px;
+}
+.help-table th,
+.help-table td {
+  padding: 6px 9px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.18));
+  text-align: left;
+  vertical-align: top;
+}
+.help-table th { color: var(--muted); font-weight: 650; }
+.help-table code { font-size: 11px; }
+.help-list { margin: 0 0 10px; padding-left: 20px; }
+.help-list li { margin-bottom: 6px; }

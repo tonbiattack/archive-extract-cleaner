@@ -75,9 +75,51 @@ jobs:
         env:
           MSIX_IDENTITY_NAME: tonbiattack.ZipSweep
           MSIX_PUBLISHER: CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E
+          MSIX_PUBLISHER_DISPLAY_NAME: tonbiattack
           MSIX_VERSION: 0.1.0.0
         run: |
           pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
+
+      - name: Verify MSIX manifest matches Partner Center
+        shell: pwsh
+        run: |
+          # Store の受領検証は Properties/PublisherDisplayName を Partner Center の
+          # 発行者表示名と照合する。WACK はここを見ないため、明示的に確認する。
+          $unpacked = Join-Path $env:RUNNER_TEMP "msix-manifest"
+          $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          & $makeappx unpack /p build/msix/ZipSweep.msix /d $unpacked /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx unpack failed" }
+          [xml]$manifest = Get-Content (Join-Path $unpacked "AppxManifest.xml") -Raw
+          $expected = @{
+            "Identity Name" = "tonbiattack.ZipSweep"
+            "Identity Publisher" = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
+            "Properties DisplayName" = "ZipSweep"
+            "Properties PublisherDisplayName" = "tonbiattack"
+            "Identity Version" = "0.1.0.0"
+            "Identity ProcessorArchitecture" = "x64"
+          }
+          $actual = @{
+            "Identity Name" = $manifest.Package.Identity.Name
+            "Identity Publisher" = $manifest.Package.Identity.Publisher
+            "Properties DisplayName" = $manifest.Package.Properties.DisplayName
+            "Properties PublisherDisplayName" = $manifest.Package.Properties.PublisherDisplayName
+            "Identity Version" = $manifest.Package.Identity.Version
+            "Identity ProcessorArchitecture" = $manifest.Package.Identity.ProcessorArchitecture
+          }
+          $failed = @()
+          foreach ($key in $expected.Keys) {
+            if ($actual[$key] -ne $expected[$key]) {
+              $failed += "$key = '$($actual[$key])' (want '$($expected[$key])')"
+            }
+          }
+          if ($failed.Count -gt 0) {
+            throw "MSIX manifest does not match Partner Center:`n" + ($failed -join "`n")
+          }
+          Write-Host "manifest matches Partner Center"
 
       - name: Verify MSIX payload
         shell: pwsh

@@ -31,6 +31,16 @@ function Require-Env([string]$Name) {
 $identityName = Require-Env "MSIX_IDENTITY_NAME"
 $publisher = Require-Env "MSIX_PUBLISHER"
 $version = Require-Env "MSIX_VERSION"
+# Properties/PublisherDisplayName は Partner Center の「発行者表示名」と完全一致
+# していなければならない。Store のパッケージ受領検証でここが照合されるため、
+# アプリ名（ZipSweep）を入れると弾かれる。WACK はこの項目を見ないので、
+# ローカルで PASS しても通らない点に注意する。
+$publisherDisplayName = Require-Env "MSIX_PUBLISHER_DISPLAY_NAME"
+# Properties/DisplayName はアプリ名。Store で予約した名前に合わせる。
+$displayName = [Environment]::GetEnvironmentVariable("MSIX_DISPLAY_NAME")
+if ([string]::IsNullOrWhiteSpace($displayName)) {
+    $displayName = "ZipSweep"
+}
 
 if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "MSIX_VERSION は 4 桁の形式（例 0.1.0.0）で指定してください: $version"
@@ -64,6 +74,13 @@ try {
     Copy-Item -LiteralPath $Exe -Destination (Join-Path $stage "archive-extract-cleaner.exe")
     Copy-Item -Path (Join-Path $Assets "*.png") -Destination (Join-Path $stage "Assets")
 
+    # XML へ埋め込む値は必ずエスケープする。
+    $xmlEscape = { param($value) [Security.SecurityElement]::Escape($value) }
+    $identityNameXml = & $xmlEscape $identityName
+    $publisherXml = & $xmlEscape $publisher
+    $publisherDisplayNameXml = & $xmlEscape $publisherDisplayName
+    $displayNameXml = & $xmlEscape $displayName
+
     $manifest = @"
 <?xml version="1.0" encoding="utf-8"?>
 <Package
@@ -72,10 +89,10 @@ try {
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap uap10 rescap">
-  <Identity Name="$identityName" Publisher="$publisher" Version="$version" ProcessorArchitecture="x64" />
+  <Identity Name="$identityNameXml" Publisher="$publisherXml" Version="$version" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>ZipSweep</DisplayName>
-    <PublisherDisplayName>ZipSweep</PublisherDisplayName>
+    <DisplayName>$displayNameXml</DisplayName>
+    <PublisherDisplayName>$publisherDisplayNameXml</PublisherDisplayName>
     <Description>ZIP などのアーカイブと解凍済みフォルダを照合し、完全一致したフォルダをごみ箱へ移動するツール</Description>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -90,7 +107,7 @@ try {
     <Application Id="App" Executable="archive-extract-cleaner.exe"
       uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="mediumIL">
       <uap:VisualElements
-        DisplayName="ZipSweep"
+        DisplayName="$displayNameXml"
         Description="ZIP などのアーカイブと解凍済みフォルダを照合し、完全一致したフォルダをごみ箱へ移動するツール"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"

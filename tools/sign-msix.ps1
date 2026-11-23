@@ -1,18 +1,23 @@
 #!/usr/bin/env pwsh
 # MSIX の署名と検証を行う。
 #
+# パスワードはコマンドラインに載せない。環境変数から読む。
+# コマンドライン引数はプロセス一覧やログに残るため。
+#
 # ローカル検証用の自己署名証明書は、その端末に証明書を信頼させないと
 # インストールできない。Store 提出用の署名は Microsoft が行うため、
 # ここで作る署名は配布物には使わない。
 #
 # 使い方:
-#   pwsh tools/sign-msix.ps1 -Package build/msix/ZipSweep.msix -Pfx cert.pfx -Password (Read-Host -AsSecureString)
+#   $env:MSIX_SIGN_PASSWORD = "<パスワード>"
+#   pwsh tools/sign-msix.ps1 -Package build/msix/ZipSweep.msix -Pfx cert.pfx
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Package,
     [Parameter(Mandatory = $true)][string]$Pfx,
-    [Parameter(Mandatory = $true)][securestring]$Password
+    # パスワードを保持する環境変数名。
+    [string]$PasswordEnv = "MSIX_SIGN_PASSWORD"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +27,10 @@ if (-not (Test-Path -LiteralPath $Package)) {
 }
 if (-not (Test-Path -LiteralPath $Pfx)) {
     throw "証明書が見つかりません: $Pfx"
+}
+$password = [Environment]::GetEnvironmentVariable($PasswordEnv)
+if ([string]::IsNullOrEmpty($password)) {
+    throw "環境変数 $PasswordEnv に署名用パスワードを設定してください。"
 }
 
 $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
@@ -36,24 +45,14 @@ if (-not $signtool) {
     throw "signtool.exe が見つかりません。Windows SDK をインストールしてください。"
 }
 
-$plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password))
-
-try {
-    & $signtool sign /fd SHA256 /f $Pfx /p $plain /td SHA256 /tr http://timestamp.digicert.com $Package
-    if ($LASTEXITCODE -ne 0) {
-        throw "署名に失敗しました（exit $LASTEXITCODE）"
-    }
-    & $signtool verify /pa /v $Package
-    if ($LASTEXITCODE -ne 0) {
-        throw "署名の検証に失敗しました（exit $LASTEXITCODE）"
-    }
-    $signature = Get-AuthenticodeSignature -LiteralPath $Package
-    Write-Host "signature status: $($signature.Status)"
-    Write-Host "signer: $($signature.SignerCertificate.Subject)"
+& $signtool sign /fd SHA256 /f $Pfx /p $password /td SHA256 /tr http://timestamp.digicert.com $Package
+if ($LASTEXITCODE -ne 0) {
+    throw "署名に失敗しました（exit $LASTEXITCODE）"
 }
-finally {
-    if ($plain) {
-        $plain = $null
-    }
+& $signtool verify /pa /v $Package
+if ($LASTEXITCODE -ne 0) {
+    throw "署名の検証に失敗しました（exit $LASTEXITCODE）"
 }
+$signature = Get-AuthenticodeSignature -LiteralPath $Package
+Write-Host "signature status: $($signature.Status)"
+Write-Host "signer: $($signature.SignerCertificate.Subject)"

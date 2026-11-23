@@ -55,6 +55,10 @@ jobs:
         shell: pwsh
         run: |
           $subject = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
+          # 使い捨てのテスト用パスワード。毎回作り直す。
+          $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+          "MSIX_SIGN_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $secure = ConvertTo-SecureString -String $password -Force -AsPlainText
           $cert = New-SelfSignedCertificate `
             -Type Custom `
             -Subject $subject `
@@ -62,9 +66,8 @@ jobs:
             -FriendlyName "ZipSweep test signing" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
-          $password = ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText
           $pfx = Join-Path $env:RUNNER_TEMP "zipsweep-test.pfx"
-          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure | Out-Null
           Write-Host "certificate thumbprint: $($cert.Thumbprint)"
           "MSIX_TEST_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -73,16 +76,15 @@ jobs:
         run: |
           pwsh -NoProfile -File tools/sign-msix.ps1 `
             -Package build/msix/ZipSweep.msix `
-            -Pfx $env:MSIX_TEST_PFX `
-            -Password (ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText)
+            -Pfx $env:MSIX_TEST_PFX
 
       - name: Trust the certificate and enable sideloading
         shell: pwsh
         run: |
           $pfx = $env:MSIX_TEST_PFX
-          $password = ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText
-          $cert = Get-PfxCertificate -FilePath $pfx -Password $password
-          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -Password $password | Out-Null
+          $secure = ConvertTo-SecureString -String $env:MSIX_SIGN_PASSWORD -Force -AsPlainText
+          $cert = Get-PfxCertificate -FilePath $pfx -Password $secure
+          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -Password $secure | Out-Null
           Write-Host "trusted: $($cert.Subject)"
           $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
           if (-not (Test-Path $key)) {

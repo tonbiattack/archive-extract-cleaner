@@ -238,26 +238,23 @@ func Scan(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	// 差分スキャン。前回結果があり、対象のフォルダ指紋と ZIP の同一性が
-	// 変わっていない項目だけを再利用する。判定に迷う要素があれば再検証する。
+	// 変わっていない項目だけを再利用する。
 	stats := &cacheStats{}
 	walker := newFolderWalker()
-	// 判定（Verdict）の再利用は行わない。
 	//
-	// フォルダ指紋は相対パス・サイズ・更新時刻から作るため、同じサイズ・
-	// 同じ更新時刻のまま中身だけ差し替えたフォルダを検出できない。実際に
-	// 「alpha」を「bravo」へ差し替えて更新時刻を戻すと、前回の
-	// DELETE_CANDIDATE がそのまま再利用され、内容が違うフォルダが削除候補に
-	// 残ることをテストで確認した（TestCachedScanDetectsSameSizeRestoredTimeFolderChange）。
+	// 再利用するのは「削除候補ではない」判定に限る（previous.canReuse 参照）。
+	// 削除候補は、フォルダ指紋がサイズと更新時刻しか見ていないため、
+	// 同サイズ・同更新時刻のまま中身だけ差し替えたフォルダを検出できない。
+	// 前回の候補を持ち越すと、内容が違うフォルダが削除候補に残ることを
+	// テストで確認した（TestCachedScanDetectsSameSizeRestoredTimeFolderChange）。
+	// 候補は毎回、実体を読んで検証し直す。
 	//
-	// ZIP エントリのハッシュキャッシュも使わない。キーはセントラルディレクトリの
-	// 構造指紋（CRC32 を含む）だが、CRC32 は圧縮データの破損を検出できない。
-	// 破損した ZIP はセントラルディレクトリが無傷のまま残るため指紋が一致し、
-	// 破損 ZIP を「一致」と誤表示することをテストで確認した
+	// ZIP エントリのハッシュキャッシュは引き続き使わない。キーはセントラル
+	// ディレクトリの構造指紋（CRC32 を含む）だが、CRC32 は圧縮データの破損を
+	// 検出できない。破損した ZIP はセントラルディレクトリが無傷のまま残るため
+	// 指紋が一致し、破損 ZIP を「一致」と誤表示することをテストで確認した
 	// （TestCachedScanDetectsCorruptArchiveWithUnchangedMetadata）。
-	//
-	// どちらも「削除候補を誤って提示しない」という不変条件を破るため、
-	// 内容の同一性を実体から確認できる方法ができるまで再利用しない。
-	prev := (*previousIndex)(nil)
+	prev := buildPreviousIndex(opts.Previous)
 
 	items, compared, err := runVerifyTasks(ctx, tasks, workers, limits, roots, state, total, scanOptions{
 		hashes: nil,

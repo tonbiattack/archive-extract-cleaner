@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,7 +101,13 @@ func TestCachedScanDetectsCorruptArchiveWithUnchangedMetadata(t *testing.T) {
 // 更新時刻のまま中身だけ差し替えたフォルダを検出できない。判定を再利用すると
 // 内容が違うフォルダが DELETE_CANDIDATE のまま残り、誤削除につながる。
 // 再利用を再開するときは、このテストが示す攻撃を防げる条件を先に設計すること。
-func TestDifferentialScanDoesNotReuseVerdicts(t *testing.T) {
+// TestDifferentialScanDoesNotReuseCandidateVerdicts は、削除候補を再利用しない
+// ことを固定する。manyPairs はすべて内容一致なので、2回目もすべて候補になり、
+// 1件も再利用されないのが正しい。
+//
+// 削除候補を候補ではない項目と混同しないよう、再利用してよい範囲は
+// reuse_policy_test.go が別途固定している。
+func TestDifferentialScanDoesNotReuseCandidateVerdicts(t *testing.T) {
 	root := t.TempDir()
 	manyPairs(t, root, 5)
 
@@ -114,7 +121,7 @@ func TestDifferentialScanDoesNotReuseVerdicts(t *testing.T) {
 	second := scanWithCache(t, root, previous, hashes, false)
 
 	if second.Cache.ReusedItems != 0 {
-		t.Fatalf("verdict reuse must stay disabled: %+v", second.Cache)
+		t.Fatalf("candidate verdicts must be re-verified: %+v", second.Cache)
 	}
 	if second.Summary.CandidateCount != first.Summary.CandidateCount {
 		t.Fatalf("candidates first=%d second=%d", first.Summary.CandidateCount, second.Summary.CandidateCount)
@@ -362,6 +369,9 @@ func TestCacheFlushAndReloadKeepsResults(t *testing.T) {
 	}
 }
 
+// TestDifferentialScanBenchmark は、候補を含む構成での所要時間を記録する。
+// この構成（manyPairs）はすべて削除候補なので再利用は起きない。候補を毎回
+// 検証する方針のコストを測るための基準になる。
 func TestDifferentialScanBenchmark(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip in short mode")
@@ -379,8 +389,42 @@ func TestDifferentialScanBenchmark(t *testing.T) {
 	second := scanWithCache(t, root, previous, hashes, false)
 	secondDuration := time.Since(start)
 
-	t.Logf("full scan: %v, differential scan: %v", firstDuration, secondDuration)
+	t.Logf("all-candidate scan: full=%v differential=%v reused=%d", firstDuration, secondDuration, second.Cache.ReusedItems)
 	if second.Cache.ReusedItems != 0 {
-		t.Fatal("unsafe cache reuse")
+		t.Fatal("candidates must be re-verified")
+	}
+}
+
+// TestDifferentialScanReuseBenchmark は、候補ではない項目が多い構成での
+// 所要時間を記録する。差分スキャンが再利用する効果を測る。
+func TestDifferentialScanReuseBenchmark(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip in short mode")
+	}
+	root := t.TempDir()
+	// 内容が違う組は MISMATCH になり、候補ではないので再利用される。
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("set%03d", i)
+		if err := testutil.WriteZip(filepath.Join(root, name+".zip"), []testutil.Entry{{Name: name + "/a.txt", Content: "zip-content"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := testutil.WriteFile(filepath.Join(root, name), "a.txt", fmt.Sprintf("folder-%03d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hashes := cache.NewArchiveHashes("")
+
+	start := time.Now()
+	first := scanWithCache(t, root, nil, hashes, false)
+	firstDuration := time.Since(start)
+
+	previous := recordFor(t, first, root)
+	start = time.Now()
+	second := scanWithCache(t, root, previous, hashes, false)
+	secondDuration := time.Since(start)
+
+	t.Logf("non-candidate scan: full=%v differential=%v reused=%d", firstDuration, secondDuration, second.Cache.ReusedItems)
+	if second.Cache.ReusedItems == 0 {
+		t.Fatal("non-candidate verdicts should be reused")
 	}
 }

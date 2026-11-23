@@ -54,6 +54,16 @@ jobs:
       - name: Build Windows GUI
         run: wails build -clean
 
+      - name: Verify executable version
+        shell: pwsh
+        run: |
+          $path = (Resolve-Path "build/bin/archive-extract-cleaner.exe").Path
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+          $expected = (Get-Content wails.json -Raw | ConvertFrom-Json).info.productVersion
+          if ($info.ProductVersionRaw.ToString() -ne "$expected.0") {
+            throw "Executable version $($info.ProductVersionRaw) does not match $expected"
+          }
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:

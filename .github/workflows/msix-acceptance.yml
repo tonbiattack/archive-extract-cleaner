@@ -47,6 +47,7 @@ jobs:
         env:
           MSIX_IDENTITY_NAME: tonbiattack.ZipSweep
           MSIX_PUBLISHER: CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E
+          MSIX_PUBLISHER_DISPLAY_NAME: tonbiattack
           MSIX_VERSION: 0.1.0.0
         run: |
           pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix

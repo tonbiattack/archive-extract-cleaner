@@ -46,9 +46,21 @@ Windows SDK `MakeAppx 10.0.26100.9457` で Wails の Windows x64 EXE、仮アイ
 ```powershell
 $env:MSIX_IDENTITY_NAME = "tonbiattack.ZipSweep"
 $env:MSIX_PUBLISHER     = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
+$env:MSIX_PUBLISHER_DISPLAY_NAME = "tonbiattack"
 $env:MSIX_VERSION       = "0.1.0.0"
 pwsh tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
 ```
+
+### マニフェストで間違えやすい点
+
+`Properties/PublisherDisplayName` は **Partner Center の「発行者表示名」** と完全一致している必要がある。アプリ名（ZipSweep）を入れると Store のパッケージ受領検証で弾かれる。
+
+```text
+アプリ マニフェスト内の PublisherDisplayName 要素が ZipSweep です。
+発行元の表示名 tonbiattack と一致しません。
+```
+
+**WACK はこの項目を照合しない。** ローカルで PASS しても Store 受領で落ちるため、CI の `Verify MSIX manifest matches Partner Center` で `Identity` と `Properties` の値を突き合わせている。
 
 ### 名称の予備調査（2026-11-23）
 

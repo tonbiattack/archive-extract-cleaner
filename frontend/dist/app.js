@@ -1381,7 +1381,7 @@
   function cacheStatusText() {
     const cache = state.cacheInfo;
     if (!cache || !cache.enabled) return "無効";
-    return "安全確認のため再利用を一時停止中";
+    return "有効（削除候補は毎回再検証）";
   }
 
   // ---------- dashboard ----------
@@ -1612,7 +1612,7 @@
       "</dl>" +
       '<p class="modal-note">上限を超えたZIPやフォルダは UNVERIFIED となり、削除候補にはなりません。設定ファイルを変更した場合はアプリを再起動してください。</p>' +
       '<p class="modal-note">multi-drive-copy のスクリプトとプリセットは設定ファイルの <code>multiDriveCopy</code> で指定します。プリセット未指定時は multi-drive-copy の設定画面が開きます。</p>' +
-      '<p class="modal-note">キャッシュの再利用は安全確認のため一時停止中です。通常スキャンでも内容を再照合します。</p>' +
+      '<p class="modal-note">差分スキャンは、削除候補ではない判定だけを再利用します。削除候補は毎回実体を読み直して検証し、ごみ箱移動の直前にも再照合します。</p>' +
       '<p class="modal-note">7z / RAR の検証には <a href="https://www.7-zip.org/" target="_blank" rel="noreferrer">7-Zip</a> が必要です。未インストールの環境では 7z / RAR は「未検証」として保持され、削除候補になりません。場所を指定する場合は設定ファイルの <code>archiveTool</code> に <code>7z.exe</code> のフルパスを書いてください。</p>';
     if (state.configWarning) {
       body += '<p class="modal-note">' + esc(state.configWarning) + "</p>";

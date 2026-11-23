@@ -73,9 +73,15 @@ func buildPreviousIndex(record *cache.RootRecord) *previousIndex {
 //
 // 再利用の条件（すべて満たす場合だけ）:
 //   - 前回の項目が再利用可能（UNVERIFIED・エラー・移動済みでない）
+//   - 前回の判定が削除候補ではない
 //   - ZIP のパス・サイズ・更新時刻が一致する
 //   - フォルダの指紋（パス集合・サイズ・更新時刻）が一致する
 //   - 対応付けが変わっていない（項目IDが同じ）
+//
+// 削除候補は決して再利用しない。フォルダ指紋はサイズと更新時刻から作るため、
+// 同じサイズ・同じ更新時刻のまま中身だけ差し替えたフォルダを検出できない。
+// 前回の候補をそのまま持ち越すと、内容が違うフォルダが削除候補に残る。
+// 候補は毎回、実体を読んで検証し直す。
 //
 // 構造指紋とハッシュの一致は ZIP ハッシュキャッシュ側で CRC とサイズを
 // 突き合わせて確認する。1つでも欠ければ再検証する。
@@ -95,6 +101,10 @@ func (p *previousIndex) canReuse(task verifyTask, limits model.Limits, walker *f
 	}
 	record, ok := p.items[taskID(task)]
 	if !ok || !record.Cacheable {
+		return cache.ItemRecord{}, nil, false
+	}
+	// 削除候補は再利用しない。ここが安全側の要になる。
+	if model.Verdict(record.Verdict).IsDeleteCandidate() {
 		return cache.ItemRecord{}, nil, false
 	}
 	previousPrint, ok := p.folder[winpath.Key(target)]

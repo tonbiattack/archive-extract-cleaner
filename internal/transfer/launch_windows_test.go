@@ -44,20 +44,32 @@ $json = $result | ConvertTo-Json -Compress -Depth 4
 	return scriptPath
 }
 
+// readFakeResult は偽スクリプトの出力を待って読む。
+//
+// WriteAllText はファイルを切り詰めてから書くため、書き込み中に読むと
+// 空または途中までの内容になる。読めた瞬間に JSON を解釈すると、
+// たまたま競合したときに「unexpected end of JSON input」で落ちる。
+// 解釈できるまで待ち、期限を過ぎて初めて失敗させる。
 func readFakeResult(t *testing.T, outputPath string) fakeScriptResult {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(outputPath)
 		if err == nil {
 			data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 			var result fakeScriptResult
-			if err := json.Unmarshal(data, &result); err != nil {
-				t.Fatalf("decode fake result: %v (%s)", err, data)
+			if err = json.Unmarshal(data, &result); err == nil {
+				return result
 			}
-			return result
+			lastErr = fmt.Errorf("decode fake result: %w (%q)", err, data)
+		} else {
+			lastErr = err
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("fake script did not produce a readable result in %s: %v", outputPath, lastErr)
 	}
 	t.Fatalf("fake script did not write %s", outputPath)
 	return fakeScriptResult{}

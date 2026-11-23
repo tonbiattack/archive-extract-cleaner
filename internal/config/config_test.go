@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -107,5 +108,49 @@ func TestLoadNormalizesWorkers(t *testing.T) {
 				t.Fatalf("workers = %d, want %d", cfg.Workers, tc.want)
 			}
 		})
+	}
+}
+
+// E/F/G の既定運用を固定する。設定を変えていない利用者は、追加操作なしで
+// 従来どおり E/F/G を検索できること（Issue #69 の完了条件）。
+func TestArchiveSearchDefaultsKeepEFGWithoutExtraSteps(t *testing.T) {
+	cfg := Default()
+	if got, want := fmt.Sprint(cfg.ArchiveSearch.Drives), "[E F G]"; got != want {
+		t.Fatalf("default drives = %s, want %s", got, want)
+	}
+	if cfg.ArchiveSearch.RelativePath != "" || cfg.ArchiveSearch.Recursive {
+		t.Fatalf("defaults must stay simple: %+v", cfg.ArchiveSearch)
+	}
+
+	// 設定ファイルが旧形式でも、読み込み後に E/F/G が補完されること。
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"workers":2}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(loaded.ArchiveSearch.Drives), "[E F G]"; got != want {
+		t.Fatalf("loaded drives = %s, want %s", got, want)
+	}
+}
+
+// 利用者が明示したドライブ設定は保持されること（後方互換）。
+func TestArchiveSearchKeepsExplicitDrives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"archiveSearch":{"enabled":true,"drives":["d","x"],"relativePath":"save","recursive":true}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := fmt.Sprint(cfg.ArchiveSearch.Drives), "[D X]"; got != want {
+		t.Fatalf("drives = %s, want %s", got, want)
+	}
+	if cfg.ArchiveSearch.RelativePath != "save" || !cfg.ArchiveSearch.Recursive {
+		t.Fatalf("explicit settings lost: %+v", cfg.ArchiveSearch)
 	}
 }

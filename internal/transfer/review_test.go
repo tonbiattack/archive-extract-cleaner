@@ -135,3 +135,54 @@ func TestBuildReviewEmpty(t *testing.T) {
 		t.Fatalf("review = %+v", review)
 	}
 }
+
+// 連携スクリプトが使えない理由を、UI が案内に使える区分で返すこと。
+// 「未導入」と「設定したパスの誤り」を混同しない。
+func TestDescribeScriptDistinguishesReasons(t *testing.T) {
+	root := t.TempDir()
+	installed := writeTestFile(t, filepath.Join(root, "Programs", "MultiDriveCopy", "MultiDriveCopy.ps1"))
+	directory := makeTestDir(t, filepath.Join(root, "not-a-file"))
+
+	cases := []struct {
+		name        string
+		path        string
+		defaultPath string
+		wantOK      bool
+		wantReason  string
+	}{
+		{name: "installed", path: installed, defaultPath: installed, wantOK: true, wantReason: ""},
+		{name: "unconfigured", path: "", defaultPath: installed, wantOK: false, wantReason: ScriptReasonUnconfigured},
+		{name: "not installed at default path", path: filepath.Join(root, "missing", "MultiDriveCopy.ps1"), defaultPath: filepath.Join(root, "missing", "MultiDriveCopy.ps1"), wantOK: false, wantReason: ScriptReasonNotInstalled},
+		{name: "configured path missing", path: filepath.Join(root, "elsewhere", "MultiDriveCopy.ps1"), defaultPath: installed, wantOK: false, wantReason: ScriptReasonNotFound},
+		{name: "path is a directory", path: directory, defaultPath: installed, wantOK: false, wantReason: ScriptReasonNotFile},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, reason := DescribeScript(tc.path, tc.defaultPath)
+			if ok != tc.wantOK || reason != tc.wantReason {
+				t.Fatalf("DescribeScript = (%v, %q), want (%v, %q)", ok, reason, tc.wantOK, tc.wantReason)
+			}
+		})
+	}
+}
+
+// 未導入でも review 自体は失敗せず、候補と理由を返すこと。
+func TestBuildReviewWithoutInstalledScriptStillListsCandidates(t *testing.T) {
+	root := t.TempDir()
+	zip := writeTestFile(t, filepath.Join(root, "photos.zip"))
+	missing := filepath.Join(root, "missing", "MultiDriveCopy.ps1")
+
+	review := BuildReview([]model.Item{
+		{ID: "a", Verdict: model.VerdictKeepArchive, Status: model.StatusReady, ZipPath: zip},
+	}, missing, "", false)
+
+	if review.ScriptAvailable {
+		t.Fatal("script should be unavailable")
+	}
+	if review.ScriptReason == "" {
+		t.Fatal("reason must explain why the script is unusable")
+	}
+	if len(review.Candidates) != 1 {
+		t.Fatalf("candidates = %d, want 1", len(review.Candidates))
+	}
+}

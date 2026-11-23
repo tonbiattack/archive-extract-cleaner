@@ -1510,6 +1510,8 @@
         "<li><strong>完全削除はしません。</strong> 削除は Windows のごみ箱への移動だけで、ごみ箱が使えない環境では中止して理由を表示します。</li>" +
         "<li><strong>移動直前に必ず再照合します。</strong> スキャン後にファイルが変わっていればスキップします。</li>" +
         "<li><strong>ごみ箱へ移した容量は、空き容量の増加ではありません。</strong> ごみ箱を空にするまで物理領域は残ります。</li>" +
+        "<li><strong>移動したファイルは Windows のごみ箱から元に戻せます。</strong> エクスプローラーでごみ箱を開き、「元に戻す」を選んでください。</li>" +
+        "<li><strong>ごみ箱への移動はバックアップの代わりになりません。</strong> ごみ箱を空にすると戻せません。重要なデータは別の場所へ複製してください。</li>" +
         "<li><strong>リンク・ジャンクション・リパースポイントは扱いません。</strong> 別ボリュームへ抜ける可能性があるためです。</li>" +
         "<li><strong>対象ルート自身は移動できません。</strong> 配下のフォルダだけが対象です。</li>" +
         "<li><strong>別の項目を含むフォルダは移動しません。</strong> パスと結果が食い違うためです。</li>" +
@@ -1550,7 +1552,10 @@
         "<tr><td><code>ai.enabled</code></td><td>AI 推薦を有効にする（既定は無効）</td></tr>" +
         "</tbody></table>" +
         '<p class="modal-note">7z / RAR の照合には <a href="https://www.7-zip.org/" target="_blank" rel="noreferrer">7-Zip</a> が必要です。' +
-        "未導入の環境では 7z / RAR は「未検証」として保持され、削除候補になりません。</p>",
+        "未導入の環境では 7z / RAR は「未検証」として保持され、削除候補になりません。" +
+        "<strong>ZIP の照合には不要で、未導入でも通常どおり使えます。</strong></p>" +
+        '<p class="modal-note">E/F/G へのコピーには <a href="https://github.com/tonbiattack/multi-drive-copy" target="_blank" rel="noreferrer">multi-drive-copy</a> が別途必要です。' +
+        "未導入でもスキャン・照合・ごみ箱への移動は使えます。</p>",
     },
   ];
 
@@ -2789,6 +2794,37 @@
     updateTransferSelection();
   }
 
+  // scriptUnavailableNote は連携スクリプトを使えない理由ごとに案内を返す。
+  // 未導入は「コピー以外は使える」ことを明示し、設定ミスとは区別する。
+  function scriptUnavailableNote(review) {
+    const path = esc(review.scriptPath || "未設定");
+    const intro = '<p class="modal-note">';
+    switch (review.scriptReason) {
+      case "not_installed":
+        return intro +
+          "multi-drive-copy が見つかりません（" + path + "）。<br>" +
+          "このアプリの<strong>スキャン・照合・ごみ箱への移動は、このまま使えます</strong>。" +
+          "E/F/G へのコピーだけが別途 multi-drive-copy の導入が必要です。<br>" +
+          '導入先: <a href="https://github.com/tonbiattack/multi-drive-copy" target="_blank" rel="noreferrer">github.com/tonbiattack/multi-drive-copy</a></p>';
+      case "not_found":
+        return intro +
+          "設定されたスクリプトが見つかりません（" + path + "）。<br>" +
+          "移動・削除された可能性があります。設定ファイルの <code>multiDriveCopy.scriptPath</code> を確認してください。</p>";
+      case "permission_denied":
+        return intro +
+          "スクリプトにアクセスできません（" + path + "）。<br>" +
+          "権限を確認するか、アクセスできる場所へ置いて <code>multiDriveCopy.scriptPath</code> を設定してください。</p>";
+      case "not_file":
+        return intro +
+          "指定されたパスはファイルではありません（" + path + "）。<br>" +
+          "フォルダではなく <code>MultiDriveCopy.ps1</code> を指定してください。</p>";
+      default:
+        return intro +
+          "multi-drive-copy のスクリプトを利用できません（" + path + "）。<br>" +
+          "設定ファイルの <code>multiDriveCopy.scriptPath</code> を確認してください。</p>";
+    }
+  }
+
   function transferReviewBody(review) {
     const groups = transferGroups(review);
     const recommendedExisting = groups.recommended.filter((candidate) => candidate.exists);
@@ -2802,10 +2838,7 @@
       '<p class="muted">ZIPが存在して内容一致する組はZIPだけを推奨します。フォルダしかない場合はフォルダを推奨します。不一致・未検証・曖昧な組は要確認として表示し、既定では選択しません。</p>' +
       '<p class="muted">コピー先・プリセット・コピー後の全転送先検証・元データのごみ箱移動は multi-drive-copy の画面で設定・確認してください。</p>';
     if (!review.scriptAvailable) {
-      html +=
-        '<p class="modal-note">multi-drive-copy のスクリプトが見つかりません: ' +
-        esc(review.scriptPath || "未設定") +
-        "<br>設定ファイルの <code>multiDriveCopy.scriptPath</code> を確認してください。</p>";
+      html += scriptUnavailableNote(review);
     }
     if (review.busy) {
       html += '<p class="modal-note">スキャンまたはごみ箱移動の処理中です。完了後に再度開いてください。</p>';
@@ -2938,7 +2971,12 @@
     const review = state.transferReview;
     if (!review) return;
     if (!review.scriptAvailable) {
-      toast("multi-drive-copy のスクリプトが見つかりません", true);
+      toast(
+        review.scriptReason === "not_installed"
+          ? "E/F/G へのコピーには multi-drive-copy の導入が必要です。スキャン・整理・ごみ箱への移動はそのまま使えます"
+          : "multi-drive-copy のスクリプトを利用できません。転送画面の案内を確認してください",
+        true
+      );
       return;
     }
     const paths = state.transferPaths.slice();

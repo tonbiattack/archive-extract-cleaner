@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,8 +32,11 @@ type Review struct {
 	MissingCount     int         `json:"missingCount"`
 	ScriptPath       string      `json:"scriptPath"`
 	ScriptAvailable  bool        `json:"scriptAvailable"`
-	Preset           string      `json:"preset"`
-	Busy             bool        `json:"busy"`
+	// ScriptReason は連携スクリプトを使えない理由。空なら利用可能。
+	// UI が「未導入」と「設定ミス」を区別して案内できるようにする。
+	ScriptReason string `json:"scriptReason,omitempty"`
+	Preset       string `json:"preset"`
+	Busy         bool   `json:"busy"`
 }
 
 type LaunchResult struct {
@@ -82,7 +86,7 @@ func BuildReview(items []model.Item, scriptPath, preset string, busy bool) Revie
 			review.MissingCount++
 		}
 	}
-	review.ScriptAvailable = ScriptAvailable(scriptPath)
+	review.ScriptAvailable, review.ScriptReason = DescribeScript(scriptPath, DefaultScriptPath())
 	return review
 }
 
@@ -201,6 +205,54 @@ func ScriptAvailable(path string) bool {
 	}
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+// 連携スクリプトを利用できない理由。UI はこれを見て案内を変える。
+const (
+	// ScriptReasonUnconfigured は既定の場所も決められない状態。
+	ScriptReasonUnconfigured = "unconfigured"
+	// ScriptReasonNotInstalled は既定の場所にスクリプトが無い状態。
+	// multi-drive-copy を導入していないだけなので、コピー以外は使える。
+	ScriptReasonNotInstalled = "not_installed"
+	// ScriptReasonNotFound は設定されたパスにスクリプトが無い状態。
+	ScriptReasonNotFound = "not_found"
+	// ScriptReasonNotFile はパスがファイルではない状態。
+	ScriptReasonNotFile = "not_file"
+	// ScriptReasonDenied は権限不足で読めない状態。
+	ScriptReasonDenied = "permission_denied"
+)
+
+// DescribeScript は連携スクリプトの状態を理由付きで返す。
+// 利用可能なら (true, "")。使えない場合は理由の区分を返す。
+func DescribeScript(path string, defaultPath string) (bool, string) {
+	if path == "" {
+		return false, ScriptReasonUnconfigured
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return false, ScriptReasonDenied
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			// 既定の場所なら「未導入」、明示設定ならパス誤りとして区別する。
+			if samePath(path, defaultPath) {
+				return false, ScriptReasonNotInstalled
+			}
+			return false, ScriptReasonNotFound
+		}
+		return false, ScriptReasonNotFound
+	}
+	if !info.Mode().IsRegular() {
+		return false, ScriptReasonNotFile
+	}
+	return true, ""
+}
+
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
 func DefaultScriptPath() string {

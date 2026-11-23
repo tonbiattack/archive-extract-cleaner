@@ -99,3 +99,21 @@ test('switching tabs changes the body', () => {
   assert.match(second, /config\.json/);
   assert.match(second, /workers/);
 });
+
+// ごみ箱からの復元と、外部ツールの必要性がヘルプに書かれていること。
+test('help explains recycle-bin restore and external tools', () => {
+  const dialogs = [];
+  const c = { esc: String, openModal: (o) => dialogs.push(o), closeModal() {} };
+  extract('  const HELP_SECTIONS = [', '  function showSettings()', c);
+
+  c.showHelp("safety");
+  const safety = dialogs[0].body;
+  assert.match(safety, /ごみ箱から元に戻せます/);
+  assert.match(safety, /バックアップの代わりになりません/);
+
+  c.showHelp("settings");
+  const settings = dialogs[1].body;
+  assert.match(settings, /7-Zip/);
+  assert.match(settings, /multi-drive-copy/);
+  assert.match(settings, /未導入でも通常どおり使えます/);
+});

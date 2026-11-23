@@ -1,0 +1,4 @@
+title: ZipSweep
+description: ZIP などのアーカイブと解凍済みフォルダを照合し、完全一致したフォルダをごみ箱へ移動する Windows 用ツール
+theme: jekyll-theme-minimal
+lang: ja

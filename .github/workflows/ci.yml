@@ -70,11 +70,11 @@ jobs:
           python -m pip install --quiet pillow
           python tools/make_icon.py
 
-      - name: Build MSIX (evaluation identity)
+      - name: Build MSIX (Partner Center identity)
         shell: pwsh
         env:
-          MSIX_IDENTITY_NAME: ZipSweep.CI.Evaluation
-          MSIX_PUBLISHER: CN=ZipSweep CI Evaluation
+          MSIX_IDENTITY_NAME: tonbiattack.ZipSweep
+          MSIX_PUBLISHER: CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E
           MSIX_VERSION: 0.1.0.0
         run: |
           pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
@@ -104,9 +104,9 @@ jobs:
           path: build/bin/archive-extract-cleaner.exe
           if-no-files-found: error
 
-      - name: Upload evaluation MSIX
+      - name: Upload MSIX
         uses: actions/upload-artifact@v4
         with:
-          name: zipsweep-msix-evaluation
+          name: zipsweep-msix
           path: build/msix/ZipSweep.msix
           if-no-files-found: error

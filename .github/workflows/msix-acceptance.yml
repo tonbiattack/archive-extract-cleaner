@@ -71,19 +71,15 @@ jobs:
           Write-Host "certificate thumbprint: $($cert.Thumbprint)"
           "MSIX_TEST_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Sign the MSIX
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File tools/sign-msix.ps1 `
-            -Package build/msix/ZipSweep.msix `
-            -Pfx $env:MSIX_TEST_PFX
-
       - name: Trust the certificate and enable sideloading
         shell: pwsh
         run: |
           $pfx = $env:MSIX_TEST_PFX
           $secure = ConvertTo-SecureString -String $env:MSIX_SIGN_PASSWORD -Force -AsPlainText
           $cert = Get-PfxCertificate -FilePath $pfx -Password $secure
+          # signtool verify の連鎖検証のため Root、MSIX のインストール許可のため
+          # TrustedPeople へ入れる。どちらも使い捨てのランナー内だけ。
+          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\Root" -Password $secure | Out-Null
           Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -Password $secure | Out-Null
           Write-Host "trusted: $($cert.Subject)"
           $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
@@ -92,6 +88,13 @@ jobs:
           }
           Set-ItemProperty -Path $key -Name "AllowAllTrustedApps" -Value 1 -Type DWord
           Set-ItemProperty -Path $key -Name "AllowDevelopmentWithoutDevLicense" -Value 1 -Type DWord
+
+      - name: Sign the MSIX
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/sign-msix.ps1 `
+            -Package build/msix/ZipSweep.msix `
+            -Pfx $env:MSIX_TEST_PFX
 
       - name: Install the package
         shell: pwsh

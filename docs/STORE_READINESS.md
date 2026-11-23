@@ -77,18 +77,38 @@ ZipSweep という名称について、公開情報の範囲で予備調査し�
 
 ### 実機・アカウントが必要（未実施）
 
-- [ ] 署名済みテスト用 MSIX をクリーンな Windows 11 x64 にインストール・起動。署名者とパッケージ ID を記録。
 - [ ] 旧 EXE とパッケージ版の並存・更新、設定・整理状態・操作ログ・画面設定の移行または維持を確認。アンインストールがユーザーデータへ及ぼす影響を確認。
 - [ ] 外付けドライブの走査、アクセス拒否、切断、読み取り失敗で未検証を削除候補にしない。
 - [ ] 確認済み項目をごみ箱へ移動し、Windows のごみ箱から復元。非対応ドライブ・権限不足では完全削除せず失敗する。
 - [ ] 7-Zip 導入済みの環境で `.7z` / `.rar` を照合できること。パッケージ内から外部 `7z.exe` を起動できること。
 - [ ] WebView2 Runtime 不在または更新時の動作。
 - [ ] multi-drive-copy 未導入・導入済みの動作。
-- [ ] Store 配布のインストール・更新・アンインストールと GitHub 版の差分を記録。証明書の信頼範囲と削除手順を確認。
-- [ ] Windows App Certification Kit を実行し、結果・OS ビルド・日時を記録。
-- [ ] Partner Center の名前予約、発行者・プライバシー・サポート情報を確認し、本人が申請・公開を最終承認。
+- [ ] store 配布のインストール・更新・アンインストールと GitHub 版の差分を記録。証明書の信頼範囲と削除手順を確認。
 
-### この環境で確認した事実（2026-11-23）
+### CI で確認済み: 署名・インストール・WACK（2026-11-23）
+
+`.github/workflows/msix-acceptance.yml` を手動実行し、次を確認した（run 45199074036）。
+
+| 項目 | 結果 |
+| --- | --- |
+| テスト証明書の作成・信頼 | 成功 |
+| signtool による署名 | 成功（`signature status: Valid`） |
+| 署名者 | `CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E` |
+| MSIX のインストール | **成功** |
+| インストールされたパッケージ | `tonbiattack.ZipSweep_0.1.0.0_x64__e28ksxe3fc9w4`（PFN と一致） |
+| 発行者 | `CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E` |
+| Windows App Certification Kit | **`OVERALL_RESULT="PASS"`**（テスト 24 件すべて PASS、FAIL・WARNING なし） |
+| アンインストール | 成功 |
+
+WACK のレポートは次のとおり。
+
+- ツール版: `10.0.26100.9457`
+- `APP_TYPE="Centennial"`、`APP_NAME="tonbiattack.ZipSweep"`、`APP_VERSION="0.1.0.0"`
+- 実行環境: Microsoft Windows Server 2025 Datacenter（GitHub Actions ランナー）
+
+**注意:** これは GitHub Actions のランナー上での結果です。クリーンな Windows 11 の実機（一般利用者の環境）での確認を代替しません。また、WACK の PASS は Store 認証の通過を保証するものではありません。
+
+### ローカル環境で確認した事実（2026-11-23）
 
 | 項目 | 結果 |
 | --- | --- |
@@ -98,15 +118,19 @@ ZipSweep という名称について、公開情報の範囲で予備調査し�
 | ドライブ | C / E / F / G すべて NTFS 固定ディスク |
 | 未署名 MSIX の生成・展開 | 成功（ペイロードのハッシュ一致） |
 | MSIX の登録（`Add-AppxPackage -Register`） | **失敗**（`0x80073CFF`: 開発者用ライセンスまたはサイドローディング対応が必要） |
-| Windows App Certification Kit | **実行不可**（`appcert.exe` が管理者特権を要求） |
-| 署名・インストール・WACK | **未実施** |
+| Windows App Certification Kit | ローカルでは**実行不可**（`appcert.exe` が管理者特権を要求） |
 
-**ブロックの理由は権限と OS です。** サイドローディングの有効化と WACK の実行には管理者権限が必要で、この環境では利用できません。また、要求されている Windows 11 のクリーン環境ではありません（この環境は Windows 10）。実機受け入れは別途必要です。
+**ローカルは非管理者かつ Windows 10 のため、署名・インストール・WACK はここでは実行できません。** 代わりに GitHub Actions のランナー（管理者権限）で実行し、上記のとおり成功した。ただしランナーは Windows Server 2025 で、Windows 11 の実機ではない。
 
 ## 現在の実装と残作業
 
-現行 CI は Windows 上で Go の検証、フロントエンドテスト、Wails EXE ビルド、Store 用素材の生成、評価用 MSIX のビルドとペイロード検証を行います。GitHub Releases には EXE を配置します。
+現行 CI は Windows 上で Go の検証、フロントエンドテスト、Wails EXE ビルド、Store 用素材の生成、**正式な識別子での MSIX ビルド**とペイロード検証を行います。GitHub Releases には EXE を配置します。
 
-Store 用の正式な識別子は Partner Center の名前予約後に確定するため、CI は**評価用の仮識別子**で MSIX を組み立て、ペイロードの一致だけを検証します。この成果物は提出できません。正式な識別子でのビルドは `tools/build-msix.ps1` に環境変数で渡します。
+CI は正式な識別子（`tonbiattack.ZipSweep` / `CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E`）で MSIX を組み立て、ペイロードの一致を検証します。成果物は `zipsweep-msix` です。
 
-署名、パッケージ版の実機受け入れ、WACK、Store 申請は未実施です。#60 は上記完了までオープンのままにします。
+署名・インストール・WACK は `msix-acceptance` ワークフロー（手動実行）で確認済みです。残るのは次のとおりです。
+
+- Windows 11 実機でのパッケージ版の動作確認（旧 EXE との並存・更新、設定の引き継ぎ、外部 `7z.exe`、WebView2、外付けドライブ、ごみ箱からの復元）
+- Partner Center への申請と公開（本人の最終承認）
+
+#60 は上記が完了するまでオープンのままにします。

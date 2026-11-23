@@ -1,0 +1,138 @@
+name: MSIX Acceptance
+
+# 署名済み MSIX のインストールと Windows App Certification Kit の実行。
+# 管理者権限とサイドローディングが必要なため、通常の CI とは分けている。
+# 手動で実行し、結果を artifacts から確認する。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wack:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          check-latest: true
+          cache: true
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.1
+
+      - name: Add Go bin to PATH
+        shell: pwsh
+        run: |
+          $wailsPath = Join-Path (go env GOPATH) "bin"
+          $wailsPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build Windows GUI
+        run: wails build -clean
+
+      - name: Generate store assets
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pillow
+          python tools/make_icon.py
+
+      - name: Build MSIX with the Partner Center identity
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: tonbiattack.ZipSweep
+          MSIX_PUBLISHER: CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E
+          MSIX_VERSION: 0.1.0.0
+        run: |
+          pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
+
+      - name: Create a test signing certificate
+        shell: pwsh
+        run: |
+          $subject = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject $subject `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "ZipSweep test signing" `
+            -CertStoreLocation "Cert:\CurrentUser\My" `
+            -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          $password = ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText
+          $pfx = Join-Path $env:RUNNER_TEMP "zipsweep-test.pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
+          Write-Host "certificate thumbprint: $($cert.Thumbprint)"
+          "MSIX_TEST_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign the MSIX
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tools/sign-msix.ps1 `
+            -Package build/msix/ZipSweep.msix `
+            -Pfx $env:MSIX_TEST_PFX `
+            -Password (ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText)
+
+      - name: Trust the certificate and enable sideloading
+        shell: pwsh
+        run: |
+          $pfx = $env:MSIX_TEST_PFX
+          $password = ConvertTo-SecureString -String "P@ssw0rd-ZipSweep-Test" -Force -AsPlainText
+          $cert = Get-PfxCertificate -FilePath $pfx -Password $password
+          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -Password $password | Out-Null
+          Write-Host "trusted: $($cert.Subject)"
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+          if (-not (Test-Path $key)) {
+            New-Item -Path $key -Force | Out-Null
+          }
+          Set-ItemProperty -Path $key -Name "AllowAllTrustedApps" -Value 1 -Type DWord
+          Set-ItemProperty -Path $key -Name "AllowDevelopmentWithoutDevLicense" -Value 1 -Type DWord
+
+      - name: Install the package
+        shell: pwsh
+        run: |
+          Add-AppxPackage -Path build/msix/ZipSweep.msix -ErrorAction Stop
+          $package = Get-AppxPackage -Name "tonbiattack.ZipSweep"
+          if (-not $package) { throw "package did not install" }
+          Write-Host "installed: $($package.PackageFullName)"
+          Write-Host "publisher: $($package.Publisher)"
+          $manifest = Get-AppxPackageManifest $package
+          Write-Host "identity: $($manifest.Package.Identity.Name)"
+          "MSIX_PACKAGE_FULL_NAME=$($package.PackageFullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run Windows App Certification Kit
+        shell: pwsh
+        run: |
+          $wack = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\App Certification Kit\appcert.exe"
+          if (-not (Test-Path $wack)) { throw "WACK not found: $wack" }
+          $report = Join-Path $env:RUNNER_TEMP "wack-report.xml"
+          & $wack reset
+          & $wack test -appxpackagepath (Resolve-Path "build/msix/ZipSweep.msix").Path -reportoutputpath $report
+          $code = $LASTEXITCODE
+          if (Test-Path $report) {
+            Write-Host "report: $report"
+            Select-String -Path $report -Pattern "OVERALL_RESULT|PASS|FAIL|WARNING" | Select-Object -First 40 | ForEach-Object { $_.Line }
+          }
+          Write-Host "appcert exit code: $code"
+          if ($code -ne 0) { throw "WACK reported failures (exit $code)" }
+
+      - name: Uninstall the package
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:MSIX_PACKAGE_FULL_NAME) {
+            Remove-AppxPackage -Package $env:MSIX_PACKAGE_FULL_NAME -ErrorAction Continue
+          }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zipsweep-msix-acceptance
+          path: |
+            build/msix/ZipSweep.msix
+            ${{ runner.temp }}/wack-report.xml
+          if-no-files-found: warn

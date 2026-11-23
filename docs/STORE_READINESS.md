@@ -21,11 +21,34 @@ Windows SDK `MakeAppx 10.0.26100.9457` で Wails の Windows x64 EXE、仮アイ
 ## 審査・掲載素材
 
 - 説明文: [STORE_LISTING.md](STORE_LISTING.md) に短い説明・長い説明・検索キーワードを用意した。
-- アイコン: `build/store-assets/` に Store が要求するサイズを生成済み（`python tools/make_icon.py`）。自作のため第三者の素材を含まない。
-- スクリーンショット: `build/store-assets/screenshots/` に 2 枚。`tools/make_sample_data.py` で生成した架空のサンプルデータを使い、個人名・実在のファイル名・機密情報を含まない。
+- アイコン: `docs/store/icons/` に Store が要求するサイズを置いた（`python tools/make_icon.py` で再生成できる）。自作のため第三者の素材を含まない。
+- スクリーンショット: `docs/store/screenshots/` に 2 枚。`tools/make_sample_data.py` で生成した架空のサンプルデータを使い、個人名・実在のファイル名・機密情報を含まない。
 - プライバシーポリシー: [PRIVACY.md](PRIVACY.md)。GitHub Pages（`https://tonbiattack.github.io/archive-extract-cleaner/PRIVACY.html`）で公開する。
 - サポート先: GitHub Issues。
 - 年齢区分・配布地域は本人が確認する（未実施）。
+
+### Partner Center の識別子（確定済み）
+
+2026-11-23 に名前予約が完了した。正式な識別子は次のとおり。
+
+| 項目 | 値 |
+| --- | --- |
+| ストア ID | `9P1CF06QFZG6` |
+| Identity Name | `tonbiattack.ZipSweep` |
+| Publisher | `CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E` |
+| PublisherDisplayName | `tonbiattack` |
+| PFN | `tonbiattack.ZipSweep_e28ksxe3fc9w4` |
+
+名前予約の有効期限は約3か月（2027年2月下旬）。それまでに初回申請を送信する。
+
+正式な識別子でのビルドは次のとおり。生成物は `build/msix/ZipSweep.msix`（約 5.1 MB）。
+
+```powershell
+$env:MSIX_IDENTITY_NAME = "tonbiattack.ZipSweep"
+$env:MSIX_PUBLISHER     = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
+$env:MSIX_VERSION       = "0.1.0.0"
+pwsh tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
+```
 
 ### 名称の予備調査（2026-11-23）
 

@@ -49,14 +49,14 @@ ZIP、解凍、整理、重複、ディスク容量、クリーンアップ、Wi
 
 | ファイル | 内容 |
 | --- | --- |
-| `build/store-assets/screenshots/01-scan-results.png` | スキャン結果の一覧。判定・サイズ・理由を表示 |
-| `build/store-assets/screenshots/02-detail-preview.png` | 行を選んだときの詳細と中身プレビュー |
+| `docs/store/screenshots/01-scan-results.png` | スキャン結果の一覧。判定・サイズ・理由を表示 |
+| `docs/store/screenshots/02-detail-preview.png` | 行を選んだときの詳細と中身プレビュー |
 
 撮影には `tools/make_sample_data.py` で生成した架空のサンプルデータを使っている。個人名・実在のファイル名・機密情報は含まない。
 
 ## アイコン
 
-`build/store-assets/` に Store が要求するサイズを生成済み（`python tools/make_icon.py`）。
+`docs/store/icons/` に Store が要求するサイズを置いている（`python tools/make_icon.py` で再生成できる）。
 
 | ファイル | サイズ |
 | --- | --- |

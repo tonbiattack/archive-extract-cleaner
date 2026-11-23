@@ -51,13 +51,14 @@ jobs:
         run: |
           pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
 
-      - name: Create a test signing certificate
+      # 証明書の作成・信頼・署名を1ステップで行う。パスワードを GITHUB_ENV へ
+      # 書き出すとログの env 表示に出てしまうため、プロセス内だけで扱う。
+      - name: Create the certificate, trust it, and sign the package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $subject = "CN=2F14A66E-02DF-43E2-93E0-5C5900B38D2E"
-          # 使い捨てのテスト用パスワード。毎回作り直す。
           $password = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
-          "MSIX_SIGN_PASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $secure = ConvertTo-SecureString -String $password -Force -AsPlainText
           $cert = New-SelfSignedCertificate `
             -Type Custom `
@@ -66,35 +67,27 @@ jobs:
             -FriendlyName "ZipSweep test signing" `
             -CertStoreLocation "Cert:\CurrentUser\My" `
             -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3", "2.5.29.19={text}")
+          Write-Host "certificate thumbprint: $($cert.Thumbprint)"
           $pfx = Join-Path $env:RUNNER_TEMP "zipsweep-test.pfx"
           Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure | Out-Null
-          Write-Host "certificate thumbprint: $($cert.Thumbprint)"
-          "MSIX_TEST_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Trust the certificate and enable sideloading
-        shell: pwsh
-        run: |
-          $pfx = $env:MSIX_TEST_PFX
-          $secure = ConvertTo-SecureString -String $env:MSIX_SIGN_PASSWORD -Force -AsPlainText
-          $cert = Get-PfxCertificate -FilePath $pfx -Password $secure
-          # signtool verify の連鎖検証のため Root、MSIX のインストール許可のため
-          # TrustedPeople へ入れる。どちらも使い捨てのランナー内だけ。
-          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\Root" -Password $secure | Out-Null
-          Import-Certificate -FilePath $pfx -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" -Password $secure | Out-Null
+          # 信頼: Root は signtool verify の連鎖検証、TrustedPeople は MSIX の
+          # インストール許可のため。どちらも使い捨てのランナー内だけ。
+          $cer = Join-Path $env:RUNNER_TEMP "zipsweep-test.cer"
+          Export-Certificate -Cert $cert -FilePath $cer -Type CERT | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+          Import-Certificate -FilePath $cer -CertStoreLocation "Cert:\LocalMachine\TrustedPeople" | Out-Null
           Write-Host "trusted: $($cert.Subject)"
+
           $key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
-          if (-not (Test-Path $key)) {
-            New-Item -Path $key -Force | Out-Null
-          }
+          if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
           Set-ItemProperty -Path $key -Name "AllowAllTrustedApps" -Value 1 -Type DWord
           Set-ItemProperty -Path $key -Name "AllowDevelopmentWithoutDevLicense" -Value 1 -Type DWord
 
-      - name: Sign the MSIX
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File tools/sign-msix.ps1 `
-            -Package build/msix/ZipSweep.msix `
-            -Pfx $env:MSIX_TEST_PFX
+          # 署名と検証。パスワードはプロセス内の環境変数だけで渡す。
+          $env:MSIX_SIGN_PASSWORD = $password
+          pwsh -NoProfile -File tools/sign-msix.ps1 -Package build/msix/ZipSweep.msix -Pfx $pfx
+          if ($LASTEXITCODE -ne 0) { throw "signing failed (exit $LASTEXITCODE)" }
 
       - name: Install the package
         shell: pwsh

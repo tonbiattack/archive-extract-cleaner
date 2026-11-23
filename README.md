@@ -147,6 +147,24 @@ CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）は Windows 上で
 
 表示名は ZipSweep ですが、既存ユーザーの更新とデータ互換性のため、実行ファイル名 `archive-extract-cleaner.exe`、リポジトリ名、設定・ログ等の保存先は変更していません。従来のショートカットも引き続き同じ実行ファイルを指せます。Windows のスタートメニューに登録するときは、既存の実行ファイルを指すショートカットを **ZipSweep** という名前で作成してください。Microsoft Store 配布は検討中で、未提出です。詳細と未検証項目は [Store 配布準備](docs/STORE_READINESS.md) を参照してください。
 
+### ストア用素材の生成
+
+```powershell
+python tools/make_icon.py            # アイコン一式（build/store-assets/）
+python tools/make_sample_data.py <出力先>  # スクリーンショット用の架空データ
+```
+
+MSIX の組み立ては `tools/build-msix.ps1` を使います。正式な識別子は Partner Center の名前予約後に確定するため、環境変数で渡します。
+
+```powershell
+$env:MSIX_IDENTITY_NAME = "<Partner Center の Identity Name>"
+$env:MSIX_PUBLISHER     = "<Partner Center の Publisher>"
+$env:MSIX_VERSION       = "0.1.0.0"
+pwsh tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
+```
+
+プライバシーポリシーは [docs/PRIVACY.md](docs/PRIVACY.md) で、GitHub Pages により `https://tonbiattack.github.io/archive-extract-cleaner/PRIVACY.html` で公開されます。
+
 ### 手動配置した場合のアンインストール
 
 自分で配置した実行ファイルとショートカット（スタートメニューの「ZipSweep」または旧名）を削除し、手動で追加したユーザー PATH があれば削除してください。設定・整理状態・操作ログ・WebView2 データは削除されず、`%AppData%\archive-extract-cleaner` と `%LocalAppData%\archive-extract-cleaner` に残ります。不要な場合は、必要なバックアップを取ってから各フォルダを手動で削除してください。

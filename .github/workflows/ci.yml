@@ -64,9 +64,49 @@ jobs:
             throw "Executable version $($info.ProductVersionRaw) does not match $expected"
           }
 
+      - name: Generate store assets
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pillow
+          python tools/make_icon.py
+
+      - name: Build MSIX (evaluation identity)
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_NAME: ZipSweep.CI.Evaluation
+          MSIX_PUBLISHER: CN=ZipSweep CI Evaluation
+          MSIX_VERSION: 0.1.0.0
+        run: |
+          pwsh -NoProfile -File tools/build-msix.ps1 -Exe build/bin/archive-extract-cleaner.exe -Out build/msix
+
+      - name: Verify MSIX payload
+        shell: pwsh
+        run: |
+          $package = "build/msix/ZipSweep.msix"
+          if (-not (Test-Path $package)) { throw "MSIX not created" }
+          $unpacked = Join-Path $env:RUNNER_TEMP "msix-unpacked"
+          $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+          & $makeappx unpack /p $package /d $unpacked /o
+          if ($LASTEXITCODE -ne 0) { throw "MakeAppx unpack failed" }
+          $built = (Get-FileHash "build/bin/archive-extract-cleaner.exe").Hash
+          $packed = (Get-FileHash (Join-Path $unpacked "archive-extract-cleaner.exe")).Hash
+          if ($built -ne $packed) { throw "MSIX payload does not match the built executable" }
+          Write-Host "MSIX payload verified"
+
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
           name: archive-extract-cleaner-windows-amd64
           path: build/bin/archive-extract-cleaner.exe
+          if-no-files-found: error
+
+      - name: Upload evaluation MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: zipsweep-msix-evaluation
+          path: build/msix/ZipSweep.msix
           if-no-files-found: error

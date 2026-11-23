@@ -3,3 +3,6 @@ frontend/wailsjs/
 .commandcode/
 *.exe
 *.test
+# 生成物（tools/ のスクリプトで再生成できる）
+build/store-assets/
+build/msix/

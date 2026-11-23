@@ -169,6 +169,48 @@ def build_icon() -> Canvas:
     return canvas
 
 
+def write_store_assets(root: Path, png: bytes) -> None:
+    """Microsoft Store 提出用のアイコン一式を書き出す。
+
+    Store は Package.appxmanifest の VisualElements が参照する
+    Square44x44Logo / Square150x150Logo / StoreLogo を要求する。
+    小さい表示でも判別できるよう、単純化した図柄を別に描く。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        print("Pillow が無いため Store 用素材は生成しません（pip install pillow）")
+        return
+    import io
+
+    out = root / "build" / "store-assets"
+    out.mkdir(parents=True, exist_ok=True)
+    image = Image.open(io.BytesIO(png)).convert("RGBA")
+
+    # 正方形ロゴ。Store の推奨サイズに合わせて複数用意する。
+    squares = {
+        "Square44x44Logo.png": 44,
+        "Square71x71Logo.png": 71,
+        "Square150x150Logo.png": 150,
+        "Square310x310Logo.png": 310,
+        "StoreLogo.png": 50,
+    }
+    for name, size in squares.items():
+        resized = image.resize((size, size), Image.LANCZOS)
+        resized.save(out / name, format="PNG")
+        print(f"wrote {out / name} ({size}x{size})")
+
+    # タイル用の横長ロゴ。背景色は UI のアクセントに合わせる。
+    wide = image.resize((310, 150), Image.LANCZOS)
+    wide.save(out / "Wide310x150Logo.png", format="PNG")
+    print(f"wrote {out / 'Wide310x150Logo.png'} (310x150)")
+
+    # タスクバー・Alt+Tab 用の unplated 版（背景透過）。
+    unplated = image.resize((44, 44), Image.LANCZOS)
+    unplated.save(out / "Square44x44Logo.targetsize-44_altform-unplated.png", format="PNG")
+    print(f"wrote {out / 'Square44x44Logo.targetsize-44_altform-unplated.png'}")
+
+
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     canvas = build_icon()
@@ -193,6 +235,8 @@ def main() -> None:
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     image.save(ico_path, format="ICO", sizes=sizes)
     print(f"wrote {ico_path} ({ico_path.stat().st_size} bytes)")
+
+    write_store_assets(root, png)
 
 
 if __name__ == "__main__":

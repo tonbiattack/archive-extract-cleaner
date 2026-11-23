@@ -54,6 +54,12 @@ jobs:
             Write-Error "ビルド成果物が見つかりません: $exe"
             exit 1
           }
+          $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo((Resolve-Path $exe).Path)
+          $configuredVersion = (Get-Content wails.json -Raw | ConvertFrom-Json).info.productVersion
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          if ($tagVersion -ne $configuredVersion -or $info.ProductVersionRaw.ToString() -ne "$configuredVersion.0") {
+            throw "Version mismatch: tag=$tagVersion config=$configuredVersion executable=$($info.ProductVersionRaw)"
+          }
           Get-Item $exe | Select-Object Name, Length
 
       - name: Write release notes
@@ -62,7 +68,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $repo = "${{ github.repository }}"
           $lines = @(
-            "## archive-extract-cleaner $tag",
+            "## ZipSweep $tag（旧称 archive-extract-cleaner）",
             "",
             "Windows 向けの実行ファイルです。ダウンロードして任意のフォルダに置き、実行してください。",
             "",
@@ -92,5 +98,5 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           gh release create $tag "build/bin/archive-extract-cleaner.exe" `
-            --title "archive-extract-cleaner $tag" `
+            --title "ZipSweep $tag" `
             --notes-file release-notes.md

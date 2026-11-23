@@ -1,4 +1,4 @@
-# archive-extract-cleaner
+# ZipSweep（旧称 archive-extract-cleaner）
 
 > **安全上のお知らせ:** 差分スキャンとアーカイブのハッシュキャッシュの再利用は一時停止しています。通常スキャン・完全再スキャンとも内容を再照合します。このページのキャッシュ高速化に関する説明や過去の測定値は、再利用の安全性が確認されるまで適用されません。
 
@@ -6,7 +6,7 @@
 
 **ZIP が残っているなら、解凍済みのフォルダは要らない。**（`.7z` / `.rar` も同じ考え方で扱えます）
 
-`archive-extract-cleaner` は、ZIPなどの圧縮ファイルと解凍済みフォルダを照合し、**内容が完全一致する解凍済みフォルダだけをWindowsのごみ箱への移動候補として提示する** Windows 向けのデスクトップアプリです。スキャンとプレビューは読み取り専用で、移動は候補を選んで最終確認した場合だけ実行します。
+**ZipSweep**（リポジトリ名・旧称 `archive-extract-cleaner`）は、ZIPなどの圧縮ファイルと解凍済みフォルダを照合し、**内容が完全一致する解凍済みフォルダだけをWindowsのごみ箱への移動候補として提示する** Windows 向けのデスクトップアプリです。スキャンとプレビューは読み取り専用で、移動は候補を選んで最終確認した場合だけ実行します。
 
 [![CI](https://github.com/tonbiattack/archive-extract-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/tonbiattack/archive-extract-cleaner/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
@@ -144,6 +144,12 @@ wails dev
 ```
 
 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）は Windows 上で `gofmt`・`go vet`・`go test`・`wails build` を実行し、exe を成果物としてアップロードします。
+
+表示名は ZipSweep ですが、既存ユーザーの更新とデータ互換性のため、実行ファイル名 `archive-extract-cleaner.exe`、リポジトリ名、設定・ログ等の保存先は変更していません。従来のショートカットも引き続き同じ実行ファイルを指せます。Windows のスタートメニューに登録するときは、既存の実行ファイルを指すショートカットを **ZipSweep** という名前で作成してください。Microsoft Store 配布は検討中で、未提出です。詳細と未検証項目は [Store 配布準備](docs/STORE_READINESS.md) を参照してください。
+
+### 手動配置した場合のアンインストール
+
+自分で配置した実行ファイルとショートカット（スタートメニューの「ZipSweep」または旧名）を削除し、手動で追加したユーザー PATH があれば削除してください。設定・整理状態・操作ログ・WebView2 データは削除されず、`%AppData%\archive-extract-cleaner` と `%LocalAppData%\archive-extract-cleaner` に残ります。不要な場合は、必要なバックアップを取ってから各フォルダを手動で削除してください。
 
 ## 使い方
 

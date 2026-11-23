@@ -28,7 +28,7 @@ func main() {
 	}
 
 	err = wails.Run(&options.App{
-		Title:                    "archive-extract-cleaner",
+		Title:                    "ZipSweep",
 		Width:                    1360,
 		Height:                   860,
 		MinWidth:                 900,

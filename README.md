@@ -13,6 +13,7 @@
 [![Wails](https://img.shields.io/badge/Wails-v2.17.1-DF0000)](https://wails.io/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2011%20x64-lightgrey)](#動作環境)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Microsoft Store](https://img.shields.io/badge/Microsoft%20Store-ZipSweep-0078D4?logo=microsoft&logoColor=white)](https://apps.microsoft.com/detail/9P1CF06QFZG6)
 
 | 手元の状態 | 結果 |
 | --- | --- |
@@ -145,7 +146,7 @@ wails dev
 
 CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）は Windows 上で `gofmt`・`go vet`・`go test`・`wails build` を実行し、exe を成果物としてアップロードします。
 
-表示名は ZipSweep ですが、既存ユーザーの更新とデータ互換性のため、実行ファイル名 `archive-extract-cleaner.exe`、リポジトリ名、設定・ログ等の保存先は変更していません。従来のショートカットも引き続き同じ実行ファイルを指せます。Windows のスタートメニューに登録するときは、既存の実行ファイルを指すショートカットを **ZipSweep** という名前で作成してください。Microsoft Store 配布は検討中で、未提出です。詳細と未検証項目は [Store 配布準備](docs/STORE_READINESS.md) を参照してください。
+表示名は ZipSweep ですが、既存ユーザーの更新とデータ互換性のため、実行ファイル名 `archive-extract-cleaner.exe`、リポジトリ名、設定・ログ等の保存先は変更していません。従来のショートカットも引き続き同じ実行ファイルを指せます。Windows のスタートメニューに登録するときは、既存の実行ファイルを指すショートカットを **ZipSweep** という名前で作成してください。Microsoft Store でも配布しています（[ZipSweep — Microsoft Store](https://apps.microsoft.com/detail/9P1CF06QFZG6)）。
 
 ### ストア用素材の生成
 
